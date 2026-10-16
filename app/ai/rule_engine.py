@@ -55,7 +55,7 @@ class ReadingContext:
 
 
 def load_rules(path: Path = RULES_PATH) -> dict:
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -77,9 +77,12 @@ def evaluate_reading(
     if rule and current.valve_open and ctx.inside is None:
         was_open_outside = previous is not None and previous.valve_open and not ctx.previous_inside
         if not was_open_outside:
-            reason = "no_gps_fix" if not current.gps_fix else "outside_geofence"
-            if previous is not None and previous.valve_open and ctx.previous_inside:
+            if not current.gps_fix:
+                reason = "no_gps_fix"
+            elif previous is not None and previous.valve_open and ctx.previous_inside:
                 reason = "left_geofence_with_valve_open"
+            else:
+                reason = "outside_geofence"
             trig: dict[str, Any] = {
                 "reason": reason,
                 "valve_open": True,

@@ -18,7 +18,7 @@ Update this file after every meaningful implementation change.
 3. ~~DB → v2 schema, `tank_calibrations`, unique `(truck_id, ts)`, Alembic~~ — done 2026-10-16.
 4. ~~Rule engine → geofence valve rule, leak/theft, GPS lost, no echo, device offline; transition-based + cooldown~~ — done 2026-10-16.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
-6. Frontend → login, one UI tree (drop unused `components/hud/` and the Energy/Analytics mock views), map with geofence drawing, tank volume + valve + GPS twin, alerts with acknowledge, reports/export.
+6. ~~Frontend → login, map with geofence drawing, tank/valve/GPS twin, alerts, reports~~ — rebuilt 2026-10-16 (frontend repo); Vercel deploy pending.
 7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
 8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), ~~Render~~ (done 2026-10-16, https://petroeye-backend.onrender.com), `/health` keep-alive pinger, Vercel (with the frontend).
 
@@ -145,6 +145,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-16 — Backend fixes found while building the frontend:** (1) `rules.yaml` is now read as UTF-8 (on Windows the default cp1252 garbled the em dash in alert messages; Linux/Render was unaffected). (2) A GPS dropout in the middle of an authorized discharge no longer raises a critical `valve_open_outside_geofence`: the reading keeps the last known geofence; leaving the zone with the valve open still alerts; `no_gps_fix` now takes priority over `left_geofence` as the reason. (3) Two backend instances inserting the same reading (overlapping deploys, or a stray local server) no longer crash the handler: the unique-constraint `IntegrityError` is treated as "already stored". 39 tests.
 
 - **2026-10-16 — Backend live on Render:** https://petroeye-backend.onrender.com (Blueprint from `render.yaml`, free plan, Virginia). Swagger at `/docs`. Verified: `/health` → database + MQTT connected; production admin login works; one status + one telemetry message from `truck-001` via EMQX reached Neon and the deployed API (truck online, parked, valve closed, no alerts). `truck-001` is now registered in production. Still to do: rotate the EMQX passwords (the shared test password still worked at deploy time) and update `MQTT_PASSWORD` in Render; add an uptime pinger on `/health`; set `CORS_ORIGINS` to the Vercel URL once the frontend is deployed; enter the real tank calibration with `PUT /trucks/truck-001/tank`.
 

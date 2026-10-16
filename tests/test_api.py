@@ -197,3 +197,53 @@ async def test_openapi_documents_security(client):
     spec = (await client.get("/openapi.json")).json()
     assert "OAuth2PasswordBearer" in spec["components"]["securitySchemes"]
     assert spec["paths"]["/geofences"]["post"]["description"]
+
+
+async def test_concurrent_duplicate_insert_is_swallowed(session, monkeypatch):
+    """Another instance stored the same reading between our duplicate check
+    and our insert: the unique constraint fires and handle_telemetry must not raise."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.services import ingestion
+
+    payload = telemetry("t-race", T0, FAR)
+    await ingest(session, payload)  # "the other instance" got there first
+
+    original = AsyncSession.scalar
+
+    async def scalar_without_duplicate_check(self, stmt, *a, **kw):
+        sql = str(stmt)
+        if "telemetry.id" in sql and "telemetry.ts" in sql:
+            return None  # pretend the duplicate check found nothing (lost race)
+        return await original(self, stmt, *a, **kw)
+
+    monkeypatch.setattr(AsyncSession, "scalar", scalar_without_duplicate_check)
+    await ingestion.handle_telemetry(payload)  # must not raise IntegrityError
+
+
+async def test_gps_dropout_during_authorized_discharge_is_not_an_alert(client, admin_headers, session):
+    h = admin_headers
+    await client.post("/trucks", headers=h, json={"truck_id": "t-gps"})
+    await client.post("/geofences", headers=h, json={"name": "Depot", "lat": DEPOT[0], "lon": DEPOT[1],
+                                                     "radius_m": 100, "truck_id": "t-gps"})
+    t = T0 + timedelta(hours=2)
+    # Valve opens inside the depot → authorized, no alert.
+    res = await ingest(session, telemetry("t-gps", t, DEPOT, valve_open=True))
+    assert res.alerts == [] and res.discharge_started.authorized
+    # GPS drops out while still discharging → only the info-level gps_fix_lost, no critical.
+    res = await ingest(session, telemetry("t-gps", t + timedelta(seconds=3), None, valve_open=True))
+    assert [a.type for a in res.alerts] == ["gps_fix_lost"]
+    assert res.telemetry.geofence_id is not None  # last known geofence kept
+    # Fix comes back OUTSIDE with the valve still open → critical "left geofence".
+    res = await ingest(session, telemetry("t-gps", t + timedelta(seconds=6), FAR, valve_open=True))
+    assert [a.type for a in res.alerts] == ["valve_open_outside_geofence"]
+    assert res.alerts[0].triggered_by["reason"] == "left_geofence_with_valve_open"
+
+
+async def test_valve_opened_without_fix_still_alerts(client, admin_headers, session):
+    await client.post("/trucks", headers=admin_headers, json={"truck_id": "t-nofix"})
+    t = T0 + timedelta(hours=3)
+    await ingest(session, telemetry("t-nofix", t, None))
+    res = await ingest(session, telemetry("t-nofix", t + timedelta(seconds=3), None, valve_open=True))
+    assert [a.type for a in res.alerts] == ["valve_open_outside_geofence"]
+    assert res.alerts[0].triggered_by["reason"] == "no_gps_fix"

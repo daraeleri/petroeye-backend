@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.rule_engine import (
@@ -27,7 +28,7 @@ from app.config import settings
 from app.core.time import as_utc, utcnow
 from app.db.base import AsyncSessionLocal
 from app.db.models import Alert, Discharge, TankCalibration, Telemetry, Truck
-from app.domain.geo import find_containing_fence, nearest_fence
+from app.domain.geo import FenceHit, find_containing_fence, nearest_fence
 from app.domain.tank import capacity_litres, measure
 from app.mqtt.schemas import StatusPayload, TelemetryPayload
 from app.schemas.operations import DischargeOut
@@ -114,6 +115,21 @@ async def ingest_telemetry(session: AsyncSession, payload: TelemetryPayload) -> 
     level_cm, volume_l = measure(geometry, payload.distance_cm)
     fences = await active_geofences_for(session, payload.truck_id)
     inside = find_containing_fence(payload.lat, payload.lon, fences)
+    if (
+        inside is None
+        and not payload.gps_fix
+        and payload.valve_open
+        and previous is not None
+        and previous.valve_open
+        and previous.geofence_id is not None
+    ):
+        # GPS dropped out in the middle of a discharge that started inside a
+        # geofence: keep the last known geofence instead of treating "no fix"
+        # as "left the zone". If the fix comes back outside with the valve
+        # still open, the rule engine then reports `left_geofence_with_valve_open`.
+        last_fence = next((f for f in fences if f.id == previous.geofence_id), None)
+        if last_fence is not None:
+            inside = FenceHit(fence=last_fence, distance_m=0.0)
 
     reading = Telemetry(
         truck_id=payload.truck_id,
@@ -262,12 +278,20 @@ async def _broadcast_after_commit(session: AsyncSession, truck_id: str, alerts: 
 async def handle_telemetry(payload: TelemetryPayload) -> None:
     async with _truck_locks[payload.truck_id]:
         async with AsyncSessionLocal() as session:
-            result = await ingest_telemetry(session, payload)
-            if not result.accepted:
-                if result.reason == "duplicate":
-                    logger.debug("Skipped duplicate reading %s @ %s", payload.truck_id, payload.ts)
+            try:
+                result = await ingest_telemetry(session, payload)
+                if not result.accepted:
+                    if result.reason == "duplicate":
+                        logger.debug("Skipped duplicate reading %s @ %s", payload.truck_id, payload.ts)
+                    return
+                await session.commit()
+            except IntegrityError:
+                # Another backend instance (e.g. overlapping deploys) stored the
+                # same (truck_id, ts) between our duplicate check and insert.
+                # The unique constraint kept the data correct; nothing to do.
+                await session.rollback()
+                logger.info("Reading %s @ %s already stored by another instance", payload.truck_id, payload.ts)
                 return
-            await session.commit()
             await _broadcast_after_commit(session, payload.truck_id, result.alerts,
                                           result.discharge_started, result.discharge_ended)
 

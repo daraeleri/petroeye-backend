@@ -113,3 +113,10 @@ def test_no_fix_payload():
 def test_lwt_status_without_ts():
     s = StatusPayload.model_validate({"schema_version": 2, "truck_id": "truck-001", "online": False})
     assert s.ts is None
+
+
+def test_rules_yaml_is_read_as_utf8():
+    from app.ai.rule_engine import RULES
+
+    # The em dash must survive on Windows too (default encoding cp1252 would garble it).
+    assert "—" in RULES["volume_drop_valve_closed"]["message"]
