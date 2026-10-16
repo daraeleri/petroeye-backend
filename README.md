@@ -78,7 +78,8 @@ fill the secret env vars:
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | Neon (or other) Postgres URL — `postgres://…?sslmode=require` is accepted |
+| `DATABASE_URL` | Neon **pooled** URL (`-pooler` host) — app traffic. Paste as given. |
+| `DATABASE_URL_UNPOOLED` | Neon **direct** URL — used only by `alembic upgrade head` at start-up |
 | `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` | HiveMQ Cloud cluster + credentials (TLS 8883 is preset) |
 | `CORS_ORIGINS` | The Vercel dashboard URL |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin account |
@@ -87,6 +88,12 @@ fill the secret env vars:
 Free instances sleep after ~15 minutes without HTTP traffic; point an uptime pinger at
 `/health` every 10 minutes. While asleep, the broker holds QoS 1 messages for the
 backend's persistent session and delivers them on reconnect.
+
+## Neon
+
+The database is the Neon project **petroEye** (`snowy-dust-11819934`, branch `production`, AWS us-east-1), declared in `neon.ts`. `neon deploy` applies it and pulls `DATABASE_URL` / `DATABASE_URL_UNPOOLED` into `.env`. The app automatically configures asyncpg for Neon's PgBouncer pooler (no statement cache, unique prepared-statement names) when the host contains `-pooler`.
+
+From far away (e.g. Cameroon → us-east-1, ~270 ms per round trip) every request is slow; that's why Render runs in `virginia`. For day-to-day local development a local Postgres is much faster.
 
 ## Layout
 

@@ -20,7 +20,7 @@ Update this file after every meaningful implementation change.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
 6. Frontend → login, one UI tree (drop unused `components/hud/` and the Energy/Analytics mock views), map with geofence drawing, tank volume + valve + GPS twin, alerts with acknowledge, reports/export.
 7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
-8. Deployment → Render (`render.yaml`), Vercel, HiveMQ Cloud, Neon, `/health` keep-alive pinger.
+8. Deployment → ~~Neon~~ (done 2026-10-16), Render (`render.yaml`), HiveMQ Cloud, Vercel, `/health` keep-alive pinger.
 
 ## API changes for the frontend (2026-10-16)
 
@@ -144,6 +144,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-16 — Neon database live.** Project petroEye (`snowy-dust-11819934`, org `org-mute-lab-77362956`, branch `production`, AWS us-east-1) linked with `neon init`, `neon.ts` created, `neon deploy` applied (no changes needed) and pulled `DATABASE_URL` (pooled) + `DATABASE_URL_UNPOOLED` (direct) into the local `.env`. Alembic now uses the direct URL; the app uses the pooled URL with asyncpg configured for PgBouncer. Migration `552c2a705a9a` applied on Neon. Verified: health OK, MQTT → backend → Neon flow (forced valve opening 2.6 km from the depot → critical alert + unauthorized discharge; opening at the depot → authorized). Round trip from the dev machine is ~270 ms, so Render must run in the `virginia` region. Test data was then cleared (all tables truncated, schema kept at `552c2a705a9a`), so Render creates the real admin from its `ADMIN_EMAIL`/`ADMIN_PASSWORD` on first start. The local `.env` points back at the local Postgres; the Neon URLs are kept there as `NEON_DATABASE_URL` / `NEON_DATABASE_URL_UNPOOLED` for reference (the app ignores them). Note: `neon deploy`/`neon env pull` rewrite `DATABASE_URL` in `.env` — run them with `--no-env-pull`, or re-point `.env` afterwards, so local runs don't write to production.
 
 - **2026-10-16 — Backend v2 built.** See "Backend v2 — Built and verified" above. Local `.env` now points at a new `petroeye` database and has dev-only `ADMIN_EMAIL`/`ADMIN_PASSWORD`/`JWT_SECRET`. Run `uv run alembic upgrade head` on any other database before starting. Only one backend may run per `MQTT_CLIENT_ID` (two `--reload` servers kicked each other off the broker during testing).
 

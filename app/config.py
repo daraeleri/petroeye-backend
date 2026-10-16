@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Query parameters some hosted Postgres providers (e.g. Neon) put in their
 # connection strings that asyncpg does not understand. TLS is enabled
-# through `connect_args` instead (see `database_requires_ssl`).
+# through `connect_args` instead (see `requires_ssl` and app/db/base.py).
 _LIBPQ_ONLY_PARAMS = {"sslmode", "channel_binding"}
 
 
@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     # --- Database -----------------------------------------------------------
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/petroeye"
+    # Neon: the direct (non-pooled) URL, used only for Alembic migrations.
+    # `neon env pull` writes it; leave unset for a plain local Postgres.
+    database_url_unpooled: str | None = None
 
     # --- MQTT ---------------------------------------------------------------
     mqtt_host: str = "localhost"
@@ -58,27 +61,40 @@ class Settings(BaseSettings):
 
     @cached_property
     def async_database_url(self) -> str:
-        """`database_url` normalised for SQLAlchemy + asyncpg.
-
-        Accepts the plain `postgres://` / `postgresql://` URLs hosted
-        providers hand out and strips libpq-only query parameters.
-        """
-        url = self.database_url
-        if url.startswith("postgres://"):
-            url = "postgresql+asyncpg://" + url[len("postgres://"):]
-        elif url.startswith("postgresql://"):
-            url = "postgresql+asyncpg://" + url[len("postgresql://"):]
-        parts = urlsplit(url)
-        query = parse_qsl(parts.query)
-        if not any(k in _LIBPQ_ONLY_PARAMS for k, _ in query):
-            return url
-        kept = [(k, v) for k, v in query if k not in _LIBPQ_ONLY_PARAMS]
-        return urlunsplit(parts._replace(query=urlencode(kept)))
+        """`DATABASE_URL` normalised for SQLAlchemy + asyncpg (app traffic)."""
+        return to_asyncpg_url(self.database_url)
 
     @cached_property
-    def database_requires_ssl(self) -> bool:
-        query = dict(parse_qsl(urlsplit(self.database_url).query))
-        return query.get("sslmode") in {"require", "verify-ca", "verify-full"}
+    def async_migration_url(self) -> str:
+        """URL for Alembic. Neon's pooled endpoint (PgBouncer, transaction
+        mode) must not be used for migrations, so prefer the direct
+        `DATABASE_URL_UNPOOLED` when it is set."""
+        return to_asyncpg_url(self.database_url_unpooled or self.database_url)
+
+
+def to_asyncpg_url(url: str) -> str:
+    """Accept the plain `postgres://` / `postgresql://` URLs hosted providers
+    hand out and strip libpq-only query parameters asyncpg rejects."""
+    if url.startswith("postgres://"):
+        url = "postgresql+asyncpg://" + url[len("postgres://"):]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query)
+    if not any(k in _LIBPQ_ONLY_PARAMS for k, _ in query):
+        return url
+    kept = [(k, v) for k, v in query if k not in _LIBPQ_ONLY_PARAMS]
+    return urlunsplit(parts._replace(query=urlencode(kept)))
+
+
+def requires_ssl(url: str) -> bool:
+    query = dict(parse_qsl(urlsplit(url).query))
+    return query.get("sslmode") in {"require", "verify-ca", "verify-full"}
+
+
+def is_pgbouncer(url: str) -> bool:
+    """Neon pooled endpoints have `-pooler` in the hostname."""
+    return "-pooler." in (urlsplit(url).hostname or "")
 
 
 settings = Settings()

@@ -1,5 +1,6 @@
-"""Alembic environment. The database URL comes from app settings
-(DATABASE_URL), never from alembic.ini."""
+"""Alembic environment. The database URL comes from app settings, never
+from alembic.ini: DATABASE_URL_UNPOOLED (Neon direct endpoint) when set,
+otherwise DATABASE_URL. Migrations must not run through PgBouncer."""
 import asyncio
 from logging.config import fileConfig
 
@@ -7,8 +8,8 @@ from alembic import context
 from sqlalchemy.engine import Connection
 
 from app.db import models  # noqa: F401  (registers all tables on Base.metadata)
-from app.db.base import Base, engine
 from app.config import settings
+from app.db.base import Base, make_engine
 
 config = context.config
 if config.config_file_name is not None:
@@ -19,7 +20,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=settings.async_database_url,
+        url=settings.async_migration_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -36,6 +37,7 @@ def do_run_migrations(connection: Connection) -> None:
 
 
 async def run_async_migrations() -> None:
+    engine = make_engine(settings.database_url_unpooled or settings.database_url, settings.async_migration_url)
     async with engine.connect() as connection:
         await connection.run_sync(do_run_migrations)
     await engine.dispose()

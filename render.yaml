@@ -1,5 +1,6 @@
 # Render Blueprint for the PetroTwin backend (free web service).
-# Database: managed Postgres elsewhere (e.g. Neon) — paste its URL into DATABASE_URL.
+# Database: Neon project petroEye (us-east-1). DATABASE_URL = pooled URL (app traffic),
+# DATABASE_URL_UNPOOLED = direct URL (Alembic migrations; must not go through PgBouncer).
 # MQTT: managed broker (e.g. HiveMQ Cloud, TLS 8883) — Render can't host a broker.
 # Free instances sleep after ~15 min without HTTP traffic: point an uptime
 # pinger (UptimeRobot, cron-job.org) at /health every 10 minutes.
@@ -8,11 +9,15 @@ services:
     name: petroeye-backend
     runtime: python
     plan: free
+    # Same region as the Neon database (AWS us-east-1): ~1 ms per query instead of ~270 ms.
+    region: virginia
     buildCommand: pip install uv && uv sync --frozen --no-dev
     startCommand: uv run --no-dev alembic upgrade head && uv run --no-dev uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_URL_UNPOOLED
         sync: false
       - key: MQTT_HOST
         sync: false

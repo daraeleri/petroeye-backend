@@ -18,3 +18,5 @@ secrets.h
 # misc
 .DS_Store
 *.log
+.neon
+node_modules/
