@@ -107,8 +107,10 @@ def evaluate_reading(
         and ctx.previous_volume_l is not None
         and ctx.capacity_l
     ):
-        drop_l = ctx.previous_volume_l - ctx.volume_l
-        limit_l = ctx.capacity_l * rule["max_drop_pct_of_capacity"] / 100
+        # Volumes are stored to 0.01 L; round so float error (13.5 - 13.2 =
+        # 0.30000000000000071) can't push a drop equal to the limit over it.
+        drop_l = round(ctx.previous_volume_l - ctx.volume_l, 2)
+        limit_l = round(ctx.capacity_l * rule["max_drop_pct_of_capacity"] / 100, 2)
         if drop_l > limit_l:
             anomalies.append(Anomaly(VOLUME_DROP_VALVE_CLOSED, rule["severity"], rule["message"], {
                 "previous_volume_l": ctx.previous_volume_l,

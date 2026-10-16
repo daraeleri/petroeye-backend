@@ -59,6 +59,8 @@ def test_volume_drop_with_valve_closed():
     assert types(evaluate_reading(reading(), reading(), ctx(volume=9.0, prev_volume=10.0, capacity=15))) == [
         "volume_drop_valve_closed"]
     assert evaluate_reading(reading(), reading(), ctx(volume=9.9, prev_volume=10.0, capacity=15)) == []
+    # Exactly at the limit is not a leak (13.5 - 13.2 is 0.30000000000000071 in floats).
+    assert evaluate_reading(reading(), reading(), ctx(volume=13.2, prev_volume=13.5, capacity=15)) == []
     # Valve open: a drop is expected.
     assert evaluate_reading(reading(valve_open=True), reading(valve_open=True),
                             ctx(inside=INSIDE, volume=9.0, prev_volume=10.0, capacity=15)) == []
