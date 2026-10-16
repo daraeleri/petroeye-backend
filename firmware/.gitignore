@@ -1,2 +1,3 @@
 .pio/
 petroeye_truck/secrets.h
+petroeye_truck/*.ino.cpp
