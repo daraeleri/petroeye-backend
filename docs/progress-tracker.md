@@ -20,7 +20,7 @@ Update this file after every meaningful implementation change.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
 6. Frontend → login, one UI tree (drop unused `components/hud/` and the Energy/Analytics mock views), map with geofence drawing, tank volume + valve + GPS twin, alerts with acknowledge, reports/export.
 7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
-8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), Render (`render.yaml`), Vercel, `/health` keep-alive pinger.
+8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), ~~Render~~ (done 2026-10-16, https://petroeye-backend.onrender.com), `/health` keep-alive pinger, Vercel (with the frontend).
 
 ## API changes for the frontend (2026-10-16)
 
@@ -145,6 +145,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-16 — Backend live on Render:** https://petroeye-backend.onrender.com (Blueprint from `render.yaml`, free plan, Virginia). Swagger at `/docs`. Verified: `/health` → database + MQTT connected; production admin login works; one status + one telemetry message from `truck-001` via EMQX reached Neon and the deployed API (truck online, parked, valve closed, no alerts). `truck-001` is now registered in production. Still to do: rotate the EMQX passwords (the shared test password still worked at deploy time) and update `MQTT_PASSWORD` in Render; add an uptime pinger on `/health`; set `CORS_ORIGINS` to the Vercel URL once the frontend is deployed; enter the real tank calibration with `PUT /trucks/truck-001/tank`.
 
 - **2026-10-16 — EMQX broker live.** Serverless deployment `ndf2189d.ala.us-east-1.emqxsl.com` (AWS us-east-1), MQTT over TLS 8883, users `petroeye-backend` and `truck-001`. TLS works with the certifi CA bundle (no custom CA needed on the backend); a wrong password is rejected. Verified: simulator `truck-001` over TLS → EMQX → backend → Postgres, 140/140 readings received; forced opening 1.2 km from the depot → critical alert + unauthorized discharge; depot discharge authorized (8.34 L). That run exposed a float-boundary false positive in `volume_drop_valve_closed` (drop 0.300…07 L vs 0.3 L limit) — fixed by rounding to 0.01 L. Local credentials live in the gitignored `.env.emqx`. **Rotate both user passwords before Render** (the test password was shared in chat and is the same for both users).
 
