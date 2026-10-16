@@ -1,0 +1,42 @@
+# Phase 1 rule-based anomaly thresholds. Versioned and editable without
+# touching Python — expect this to change often during hardware
+# calibration. See app/ai/rule_engine.py for how these are evaluated.
+version: 1
+
+static_rules:
+  - type: overheat
+    field: temperature_c
+    op: gt
+    threshold: 60
+    severity: critical
+    message: "Temperature exceeded safe threshold"
+
+  - type: rollover_risk
+    field: tilt_deg
+    op: gt
+    threshold: 25
+    severity: critical
+    message: "Tilt angle indicates rollover risk"
+
+  - type: low_fuel
+    field: fuel_level_pct
+    op: lt
+    threshold: 5
+    severity: warning
+    message: "Fuel level critically low"
+
+  - type: tamper_hatch
+    field: hatch_open
+    op: eq
+    threshold: true
+    severity: warning
+    message: "Hatch opened unexpectedly"
+
+# Rate-of-change rule: compares the current reading to the truck's previous
+# reading rather than a single static threshold. Handled separately in
+# rule_engine.py because it needs two data points, not one.
+fuel_drop_rule:
+  type: fuel_leak
+  max_drop_pct_per_reading: 0.4
+  severity: critical
+  message: "Fuel dropping faster than normal burn rate — possible leak"

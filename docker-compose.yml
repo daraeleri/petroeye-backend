@@ -1,0 +1,31 @@
+# Local dev stack: MQTT broker + TimescaleDB.
+# `docker compose up` gets you a working broker + DB in under a minute,
+# so the simulator (or the hardware team testing real connectivity) has
+# somewhere to publish to immediately.
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: petrotwin
+      POSTGRES_PASSWORD: petrotwin_dev
+      POSTGRES_DB: petrotwin
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+
+volumes:
+  mosquitto_data:
+  mosquitto_log:
+  timescale_data:
