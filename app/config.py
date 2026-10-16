@@ -36,6 +36,10 @@ class Settings(BaseSettings):
 
     # --- HTTP / CORS --------------------------------------------------------
     cors_origins: str = "http://localhost:3000"
+    # Also allow any origin matching this regex: the production Vercel app and
+    # its preview deployments (petroeye-frontend-<hash>-<team>.vercel.app).
+    # Set to an empty string to rely on CORS_ORIGINS only.
+    cors_origin_regex: str = r"https://petroeye-frontend(-[a-z0-9-]+)?\.vercel\.app"
 
     # --- Auth ---------------------------------------------------------------
     jwt_secret: str = "change-me-in-production"

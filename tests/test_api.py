@@ -247,3 +247,22 @@ async def test_valve_opened_without_fix_still_alerts(client, admin_headers, sess
     res = await ingest(session, telemetry("t-nofix", t + timedelta(seconds=3), None, valve_open=True))
     assert [a.type for a in res.alerts] == ["valve_open_outside_geofence"]
     assert res.alerts[0].triggered_by["reason"] == "no_gps_fix"
+
+
+async def test_cors_allows_vercel_app_and_previews_only(client):
+    def preflight(origin):
+        return client.options("/trucks", headers={
+            "Origin": origin, "Access-Control-Request-Method": "GET", "Access-Control-Request-Headers": "authorization"})
+
+    for ok in ("https://petroeye-frontend.vercel.app",
+               "https://petroeye-frontend-git-main-daraeleri.vercel.app",
+               "https://petroeye-frontend-a1b2c3d4e-daraeleri.vercel.app",
+               "http://localhost:3000"):
+        r = await preflight(ok)
+        assert r.status_code == 200 and r.headers["access-control-allow-origin"] == ok, ok
+    for bad in ("https://evil.vercel.app",
+                "https://petroeye-frontend.vercel.app.evil.com",
+                "http://petroeye-frontend.vercel.app",
+                "https://notpetroeye-frontend.vercel.app"):
+        r = await preflight(bad)
+        assert "access-control-allow-origin" not in r.headers, bad
