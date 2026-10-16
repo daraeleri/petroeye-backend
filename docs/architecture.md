@@ -4,7 +4,8 @@
 
 | Layer          | Technology                              | Role |
 | -------------- | ---------------------------------------- | ---- |
-| Backend        | FastAPI (Python, async)                  | REST + WebSocket API, MQTT subscriber orchestration, rule engine, anchoring service |
+| Backend        | FastAPI (Python 3.11, async), SQLAlchemy 2 + Alembic, paho-mqtt 2 | REST + WebSocket API, MQTT ingestion, rule engine, reports, anchoring queue |
+| Auth           | Email + password (bcrypt), JWT bearer tokens | Dashboard login, roles admin/operator/viewer |
 | Device         | ESP32 firmware (planned: PlatformIO, `firmware/`) | Reads NEO-6M GPS + HC-SR04 ultrasonic, drives the FDP-270A valve locally, publishes MQTT |
 | Protocol       | MQTT (QoS 1) — Mosquitto locally, managed broker in staging | Truck sensor unit → backend telemetry transport (one direction only) |
 | Frontend       | Next.js + TypeScript                     | Digital twin dashboard, fleet views, alert feed |
@@ -22,13 +23,13 @@ Besides the ESP32, the prototype truck has exactly three devices (see `hardware-
 
 | Device | Raw signal sent | Derived on the backend |
 | ------ | --------------- | ---------------------- |
-| NEO-6M GPS | fix, lat/lon, speed, course, sats, hdop | trips, stops, geofence entry/exit, route deviation |
+| NEO-6M GPS | fix, lat/lon, speed, course, sats, hdop | position on the map, moving/parked, which geofence the truck is in |
 | HC-SR04 ultrasonic | `distance_cm` (median of 5 pings) | liquid level → volume (L) via the truck's tank calibration |
 | FDP-270A solenoid valve | `valve_open` (state only) | discharge events (start/end, litres discharged, location) |
 
-The device sends raw measurements; all unit conversion and calibration happen on the backend, so tank geometry can change without a firmware reflash. Alert logic combines these signals (e.g. volume falling while the valve is closed = possible leak/theft; valve opened outside an approved delivery zone = unauthorised discharge).
+The device sends raw measurements; all unit conversion and calibration happen on the backend, so tank geometry can change without a firmware reflash. Alert logic combines these signals (e.g. volume falling while the valve is closed = possible leak/theft; valve opened outside an approved geofence = unauthorised discharge).
 
-## Deployment (target — free tiers)
+## Deployment (free tiers — `render.yaml`)
 
 | Piece | Host | Notes |
 | ----- | ---- | ----- |
@@ -39,14 +40,58 @@ The device sends raw measurements; all unit conversion and calibration happen on
 
 Local development keeps `docker-compose.yml` (Mosquitto + Postgres).
 
+## Ingestion Pipeline
+
+For every telemetry message (`app/services/ingestion.py`, one asyncio lock per truck so readings are processed in order):
+
+1. **Validate** (`app/mqtt/schemas.py`, on paho's thread): schema v2, unknown fields rejected, body `truck_id` must match the topic. Invalid messages are logged and dropped.
+2. **Register** the truck if unknown and `AUTO_REGISTER_TRUCKS=true`; otherwise reject.
+3. **De-duplicate** on `(truck_id, ts)` (QoS 1 can redeliver). Out-of-order readings are stored but don't drive state transitions.
+4. **Derive** level/volume from the tank calibration (`app/domain/tank.py`) and the containing geofence (`app/domain/geo.py`).
+5. **Evaluate rules** (`app/ai/rule_engine.py` + `rules.yaml`) against the previous reading. Rules fire on transitions, with an optional per-rule cooldown.
+6. **Track discharges**: valve closed→open starts a `discharges` row (authorized = inside a geofence), open→closed ends it with litres.
+7. **Commit**, then broadcast `truck.update`, `alert.created`, `discharge.started/ended` over the WebSocket and queue critical alerts for anchoring.
+
+Status messages update connectivity. An `online:false` **without** `ts` is the MQTT Last Will → `device_offline` alert; with `ts` it's a clean shutdown → activity log only.
+
+## Alert Rules
+
+| Type | Severity | Fires when |
+| ---- | -------- | ---------- |
+| `valve_open_outside_geofence` | critical | Valve becomes open while not inside an active geofence for the truck (or with no GPS fix), or the truck leaves the geofence with the valve open |
+| `volume_drop_valve_closed` | warning | Volume falls by more than 2% of capacity between two readings with the valve closed (provisional threshold; 10-min cooldown) |
+| `level_sensor_no_echo` | warning | `distance_cm` goes from a value to `null` |
+| `device_offline` | warning | MQTT Last Will received |
+| `gps_fix_lost` | info | `gps_fix` goes true → false |
+
+## REST API (summary — full docs at `/docs`)
+
+| Area | Endpoints | Who |
+| ---- | --------- | --- |
+| Auth | `POST /auth/login` (form: email in `username`), `GET /auth/me`, `POST /auth/me/password` | everyone |
+| Users | `GET/POST /users`, `GET/PATCH /users/{id}` | admin |
+| Trucks | `GET /trucks`, `GET /trucks/{id}`, `GET /trucks/{id}/telemetry`, `GET /trucks/{id}/tank` | everyone |
+| | `POST /trucks`, `PATCH /trucks/{id}`, `PUT /trucks/{id}/tank` | admin |
+| Geofences | `GET /geofences`, `GET /geofences/{id}`, `GET /geofences/check` | everyone |
+| | `POST /geofences`, `PATCH/DELETE /geofences/{id}` (DELETE = deactivate) | operator, admin |
+| Alerts | `GET /alerts`, `GET /alerts/{id}` | everyone |
+| | `POST /alerts/{id}/acknowledge` | operator, admin |
+| Discharges | `GET /discharges`, `GET /discharges/{id}` | everyone |
+| Reports | `GET /reports/summary`, `GET /reports/activity`, `GET /reports/export/{activity,discharges,alerts,telemetry}` | everyone |
+| | `GET /reports/export/audit` | admin |
+| System | `GET /health` | no auth |
+| Live | `WS /ws?token=<JWT>` | everyone |
+
 ## System Boundaries
 
 - `app/mqtt/` — MQTT client lifecycle, topic subscription, payload validation. Never touches HTTP routing directly.
-- `app/api/` — REST endpoints (trucks, alerts, history). Strictly reads from DB / writes commands; no MQTT client code here.
+- `app/api/` — REST endpoints and auth dependencies. Reads/writes the DB through `app/services/`; no MQTT client code here.
+- `app/services/` — orchestration: `ingestion.py` (MQTT → DB → rules → WS), `fleet.py` (truck snapshots), `alerts.py`, `reports.py`, `audit.py`, `bootstrap.py` (first admin).
+- `app/domain/` — pure maths: geofence distance/containment, tank level/volume. No I/O.
 - `app/ws/` — WebSocket connection manager, broadcasts normalized events to subscribed dashboard clients.
 - `app/ai/` — `rule_engine.py` (Phase 1) and `ml_model.py` (Phase 2). Pure functions over telemetry in, `Anomaly` objects out. No DB or MQTT calls inside these modules — orchestration happens one layer up.
 - `app/web3/` — contract client, event anchoring queue/worker. Anchoring is async and never blocks the ingestion path.
-- `app/db/` — SQLAlchemy models, Alembic migrations.
+- `app/db/` — SQLAlchemy models. Schema changes via Alembic (`migrations/`).
 - **Frontend (separate repo, Vercel)** — the Next.js dashboard. Consumes only this service's REST + WebSocket API; never talks to MQTT, the database or a blockchain directly. Its layout and UI rules live in that repo's `docs/`.
 - `firmware/` — **(planned; which repo is still open)** ESP32 firmware. Publishes exactly the schema in `hardware-integration-guide.md` and owns all valve logic.
 - `simulation/` — independent of the production backend; talks to the MQTT broker exactly like a real truck would.
@@ -54,14 +99,20 @@ Local development keeps `docker-compose.yml` (Mosquitto + Postgres).
 
 ## Storage Model
 
-- **`telemetry` table** (schema v2, target): `truck_id, ts, gps_fix, lat, lon, speed_kmh, course_deg, sats, hdop, distance_cm, valve_open, level_cm, volume_l, schema_version`, unique on `(truck_id, ts)`. `level_cm`/`volume_l` are computed at ingest from the truck's calibration. Source of truth for all sensor history. (The current code still stores the v1 columns until the ingestion rewrite lands.)
-- **Postgres relational tables**: `trucks` (id, plate, status, operator), `tank_calibrations` (truck_id, shape, inner dimensions, sensor mounting offset, effective_from), `alerts` (id, truck_id, type, severity, created_at, resolved_at, resolution_note, onchain_tx_hash), `users` (auth), `devices` (per-truck MQTT credentials/cert refs).
+- **`telemetry`**: `truck_id, ts, received_at, gps_fix, lat, lon, speed_kmh, course_deg, sats, hdop, distance_cm, valve_open, schema_version` (raw) + `level_cm, volume_l, geofence_id` (derived at ingest). Unique on `(truck_id, ts)`. Source of truth for sensor history.
+- **`trucks`**: `truck_id` (the MQTT topic ID), plate, driver_name, notes, connectivity (`online`, `last_seen_at`, firmware, RSSI, uptime). Activity (`offline/parked/moving/discharging`) is derived, not stored.
+- **`tank_calibrations`**: one per truck — shape (`rectangular`, `vertical_cylinder`, `horizontal_cylinder`), inner dimensions, `sensor_offset_cm`. Applies to readings received after it's set.
+- **`geofences`**: name, centre lat/lon, `radius_m`, optional `truck_id` (null = all trucks), `is_active`. Deactivated, never deleted.
+- **`discharges`**: valve sessions — opened/closed at, positions, `geofence_id`, `authorized`, volume start/end, `litres`, linked alert.
+- **`alerts`** (append-only): type, severity, message, `triggered_by` (explainability), position, `digest` (SHA-256 for anchoring), `onchain_tx_hash`. **`alert_acknowledgements`**: one per alert, user + note.
+- **`users`**: email (unique, lower-case), bcrypt hash, role, `is_active`. Never deleted.
+- **`audit_log`**: user actions (logins, user/truck/geofence/calibration changes, acknowledgements, exports) and device online/offline events. Feeds the activity report.
 - **On-chain**: only a hash digest of the alert/event payload + `alert_id` + timestamp is anchored — never raw telemetry or PII. This keeps gas costs low and avoids putting sensitive operational data on a public chain.
 
 ## Auth and Access Model
 
-- **Dashboard users**: JWT-based auth, roles `admin`, `operator`, `viewer`.
-- **Truck devices**: per-device MQTT username/password (or client cert in later hardening pass), issued and revocable per truck, never shared across trucks.
+- **Dashboard users**: email + password (bcrypt) → JWT bearer token (`ACCESS_TOKEN_MINUTES`, default 12 h). No public sign-up: admins create users; the first admin comes from `ADMIN_EMAIL`/`ADMIN_PASSWORD` on an empty database. Roles: `viewer` (read + export), `operator` (+ geofences, acknowledge alerts), `admin` (+ users, trucks, tank calibration, audit export). The WebSocket takes the token as `?token=`.
+- **Truck devices**: per-device MQTT username/password managed on the broker (e.g. HiveMQ Cloud access management), issued and revocable per truck, never shared across trucks. With `AUTO_REGISTER_TRUCKS=false` the backend also ignores trucks not registered via the API.
 - **Blockchain writes**: signed by a single backend-held anchoring service key (never a user key); this key is never committed to the repo — see Invariants.
 
 ## Invariants

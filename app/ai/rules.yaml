@@ -1,42 +1,43 @@
-# Phase 1 rule-based anomaly thresholds. Versioned and editable without
-# touching Python — expect this to change often during hardware
-# calibration. See app/ai/rule_engine.py for how these are evaluated.
-version: 1
+# Phase 1 rule-based anomaly detection for the real prototype sensors
+# (NEO-6M GPS, HC-SR04 ultrasonic level, FDP-270A valve state).
+# Editable without touching Python. See app/ai/rule_engine.py.
+#
+# All rules fire on a state TRANSITION (e.g. valve goes from closed to open
+# outside a geofence), not on every reading, so one event = one alert.
+version: 2
 
-static_rules:
-  - type: overheat
-    field: temperature_c
-    op: gt
-    threshold: 60
-    severity: critical
-    message: "Temperature exceeded safe threshold"
-
-  - type: rollover_risk
-    field: tilt_deg
-    op: gt
-    threshold: 25
-    severity: critical
-    message: "Tilt angle indicates rollover risk"
-
-  - type: low_fuel
-    field: fuel_level_pct
-    op: lt
-    threshold: 5
-    severity: warning
-    message: "Fuel level critically low"
-
-  - type: tamper_hatch
-    field: hatch_open
-    op: eq
-    threshold: true
-    severity: warning
-    message: "Hatch opened unexpectedly"
-
-# Rate-of-change rule: compares the current reading to the truck's previous
-# reading rather than a single static threshold. Handled separately in
-# rule_engine.py because it needs two data points, not one.
-fuel_drop_rule:
-  type: fuel_leak
-  max_drop_pct_per_reading: 0.4
+# The valve opened while the truck is not inside an active geofence assigned
+# to it (or with no GPS fix, so the location can't be confirmed). Also fires
+# if the truck leaves the geofence while the valve is still open.
+valve_open_outside_geofence:
   severity: critical
-  message: "Fuel dropping faster than normal burn rate — possible leak"
+  message: "Valve opened outside an approved geofence"
+
+# Volume dropped between two consecutive readings while the valve was closed
+# both times: possible leak or theft.
+# PROVISIONAL threshold — must be calibrated against the real HC-SR04 noise
+# on the prototype tank (see Open Questions in docs/progress-tracker.md).
+volume_drop_valve_closed:
+  severity: warning
+  max_drop_pct_of_capacity: 2.0
+  # A leak keeps dropping on every reading; raise at most one alert per
+  # truck in this window instead of one every few seconds.
+  cooldown_s: 600
+  message: "Tank volume dropped while the valve was closed — possible leak or theft"
+
+# GPS had a fix on the previous reading and lost it on this one.
+gps_fix_lost:
+  severity: info
+  message: "GPS fix lost"
+
+# The ultrasonic sensor stopped returning an echo (distance_cm became null).
+level_sensor_no_echo:
+  severity: warning
+  message: "Tank level sensor returned no echo"
+
+# The device disconnected unexpectedly: the broker published its MQTT Last Will.
+# A clean shutdown (device publishes online:false itself) is logged as activity
+# but does not raise this alert.
+device_offline:
+  severity: warning
+  message: "Truck device went offline"

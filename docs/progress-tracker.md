@@ -8,23 +8,46 @@ Update this file after every meaningful implementation change.
 
 ## Current Goal
 
-- Contract first: telemetry schema v2 is defined in `hardware-integration-guide.md` (docs only, 2026-10-16). Next: port backend ingestion + DB + rules and the simulator to v2, then the frontend, then the ESP32 firmware, then deploy (Render + Vercel).
-- **Known drift:** until the backend/simulator port lands, the code still speaks v1 while the hardware guide describes v2. Firmware should target v2.
+- Backend v2 is built and verified (2026-10-16). Next: frontend on the new API (login, map with geofences, valve/volume twin, alerts, reports), then the ESP32 firmware, then deploy.
+- **API break for the frontend:** every REST call now needs `Authorization: Bearer <token>` and the WebSocket needs `?token=`. Response shapes changed completely (see "API changes for the frontend" below). The frontend repo still speaks v1.
 
 ## Remake Plan (in order, one boundary per step)
 
-1. ~~Repo hygiene~~ — done 2026-10-16 as part of the repo split (see Session Notes).
-2. Backend MQTT ingestion → v2 schema; TLS support for the managed broker; resilient startup when the broker is unreachable.
-3. DB → v2 telemetry columns + `tank_calibrations`, unique `(truck_id, ts)`, Alembic migrations instead of `create_all`.
-4. Rule engine → leak/theft (volume drop with valve closed), discharge outside a zone, GPS fix lost, device offline; alert de-duplication.
-5. Simulator → v2 payloads and scenarios matching the real sensors.
-6. Frontend → one UI tree (drop the unused `components/hud/` views, plus the Energy/Analytics battery/pricing mock views), tank volume + valve + GPS twin; compress the 48 MB GLB.
-7. Firmware → `firmware/` PlatformIO project for the ESP32.
-8. Deployment → Render (backend), Vercel (frontend), managed MQTT + Postgres, `/health` keep-alive pinger.
+1. ~~Repo hygiene~~ — done 2026-10-16 as part of the repo split.
+2. ~~Backend MQTT ingestion → v2, TLS, resilient startup~~ — done 2026-10-16.
+3. ~~DB → v2 schema, `tank_calibrations`, unique `(truck_id, ts)`, Alembic~~ — done 2026-10-16.
+4. ~~Rule engine → geofence valve rule, leak/theft, GPS lost, no echo, device offline; transition-based + cooldown~~ — done 2026-10-16.
+5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
+6. Frontend → login, one UI tree (drop unused `components/hud/` and the Energy/Analytics mock views), map with geofence drawing, tank volume + valve + GPS twin, alerts with acknowledge, reports/export.
+7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
+8. Deployment → Render (`render.yaml`), Vercel, HiveMQ Cloud, Neon, `/health` keep-alive pinger.
+
+## API changes for the frontend (2026-10-16)
+
+- **Auth:** `POST /auth/login` (form-encoded `username`=email, `password`) → `{access_token, expires_in, user}`. Send the token on every request; 401 → back to login. `GET /auth/me` for the current user and role.
+- **Trucks:** `GET /trucks` returns `TruckOut` = identity + `online`, `activity` (`offline|parked|moving|discharging`), `open_alerts`, `capacity_l`, `fill_pct`, `latest` (gps_fix, lat, lon, speed_kmh, course_deg, sats, hdop, distance_cm, level_cm, volume_l, valve_open, geofence_id). Old v1 fields (fuel/temperature/pressure/tilt/flow/hatch) are gone.
+- **New resources:** `/geofences` (+ `/geofences/check`), `/discharges`, `/alerts/{id}/acknowledge`, `/reports/summary`, `/reports/activity`, `/reports/export/{kind}?format=csv|json`, `/users` (admin), `/trucks/{id}/tank`.
+- **WebSocket** `/ws?token=…` messages: `truck.update` (TruckOut), `alert.created`, `alert.acknowledged` (AlertOut), `discharge.started`, `discharge.ended` (DischargeOut).
+- Role-based UI: hide geofence editing/acknowledge for `viewer`, user management for non-admins.
 
 ## Completed
 
-### Backend — Verified (2026-07-20)
+### Backend v2 — Built and verified (2026-10-16)
+- **Auth**: email + password (bcrypt), JWT bearer, roles admin/operator/viewer, first admin from env, admin user management, change own password, WebSocket token auth.
+- **Ingestion** (`app/services/ingestion.py`): schema v2 validation (extra fields rejected), auto-register (configurable), idempotent on `(truck_id, ts)`, per-truck ordering lock, tank level/volume from calibration, geofence containment, rule evaluation, discharge sessions, WebSocket broadcast after commit, critical alerts queued for anchoring.
+- **MQTT client**: paho v2 API, TLS (certifi), `connect_async` + auto-reconnect (broker down at startup no longer crashes the app), persistent session (`clean_session=False`, stable client ID), QoS 1.
+- **Geofences**: point + radius, per-truck or fleet-wide, deactivate instead of delete, `/geofences/check`.
+- **Rules** (`rules.yaml` v2): `valve_open_outside_geofence` (critical), `volume_drop_valve_closed` (warning, provisional 2%, 10-min cooldown), `level_sensor_no_echo`, `device_offline` (Last Will only), `gps_fix_lost`. All transition-based.
+- **Reports**: summary, activity timeline (discharges, alerts, acks, device + user events), CSV/JSON export of activity/discharges/alerts/telemetry/audit; every export is audited.
+- **DB**: 9 tables, Alembic initial migration `552c2a705a9a`; new local database `petroeye` (old v1 data left untouched in `petrotwin`).
+- **Swagger**: overview with login steps, roles table, geofence rule, WebSocket events, MQTT pointer; every endpoint has a summary, description, examples and documented error codes; **Authorize** button logs in with email/password.
+- **Deploy**: `render.yaml` (free plan, migrations on start, `/health` check), `.env.example` documents every setting incl. Neon/HiveMQ.
+- **Tests**: 35 pytest tests (domain maths, rules, payload validation, auth/roles, full ingestion → discharges → alerts → reports flow) on SQLite.
+- **Verified live** against local Postgres 18 + Mosquitto: seeded via API; simulator delivery → authorized discharge, forced opening 1.26 km from the depot → critical alert + unauthorized discharge, leak → one warning, abrupt disconnect → `device_offline`; WebSocket rejects missing token and streams `truck.update` with one.
+
+### Backend v1 (2026-07-20) — superseded by v2
+
+(historical — v1 sensors, no longer in the code)
 - **Infrastructure**: `docker-compose.yml` with Mosquitto broker (1883) + TimescaleDB (5432). Verified containers reachable.
 - **FastAPI async MQTT subscriber**: `app/mqtt/client.py` — paho-mqtt on background thread, dispatches to async handlers via `asyncio.run_coroutine_threadsafe`. Subscribes to `petrotwin/+/telemetry` and `petrotwin/+/status`.
 - **DB schema**: `Telemetry`, `Truck`, `Alert`, `Device` SQLAlchemy models (async, asyncpg). Tables auto-created via `init_db()`.
@@ -34,7 +57,7 @@ Update this file after every meaningful implementation change.
 - **Web3 anchoring stub**: `app/web3/anchoring.py` — async queued worker logging what it would anchor.
 - **Truck simulator**: `simulation/truck_simulator.py` (7 scenarios + LWT), `fleet_runner.py`. Publishing confirmed against live broker.
 
-### Frontend — Dashboard (2026-07-20)
+### Frontend — Dashboard (2026-07-20, frontend repo, v1 API)
 - **Scaffold**: Next.js 15 + TypeScript strict mode, Tailwind v4 with PetroTwin design tokens (CSS variables from `docs/ui-context.md`), shadcn/ui primitives (button, card, dialog, badge). `npm run build` passes with zero errors.
 - **4 reusable HUD components** in `frontend/components/hud/`:
   - `RadialGauge` — SVG 270° arc, color transitions safe→warning→critical via thresholds. Mono value + unit centered.
@@ -78,22 +101,19 @@ Update this file after every meaningful implementation change.
 
 ## Next Up
 
-- Real Alembic migration setup (replacing `init_db()` create_all).
-- Real Web3 testnet anchoring (replacing stub) — blocked on network choice Open Question.
-- JWT auth on REST/WS endpoints + per-device MQTT credential enforcement.
-- 3D digital twin view (`frontend/components/twin-3d/`) — explicitly Phase 2+.
-- Battery cluster telemetry fields in backend schema + simulator (SOC, SOH, Vmax/Vmin, Tmax/Tmin per cluster) — currently using static mock data in AnalyticsView/EnergyView.
-- Weather and electricity pricing data sources — currently static mock data in AnalyticsView.
-- Historical playback mode integration with TimelineScrubber across all views.
-- Responsive / tablet layout adaptation for the new sidebar + multi-column views.
+- Frontend on the v2 API (remake step 6).
+- ESP32 firmware (step 7), then deployment (step 8).
+- Later: real Web3 testnet anchoring (stub today), login rate limiting / token refresh, telemetry retention or downsampling for the free Neon storage limit.
 
 ## Open Questions
 
 ### Remake (2026-10-16)
-- **Tank geometry:** shape (rectangular / vertical cylinder / horizontal cylinder) and inner dimensions of the prototype tank, plus the HC-SR04 mounting offset. Needed for distance → volume.
+- **Leak threshold:** `volume_drop_valve_closed` uses a provisional 2% of capacity per reading. Calibrate it against the real HC-SR04 noise on the prototype tank (sloshing while driving will matter).
+- **Should the ESP32 also block the valve outside a geofence?** Today the backend only detects and alerts (the stack is read-only towards the truck). Blocking on the device would need the geofence list on the ESP32 (e.g. the device fetching it over HTTPS), which is a new device-facing interface — decide before the firmware step.
+- **Tank geometry:** shape (rectangular / vertical cylinder / horizontal cylinder) and inner dimensions of the prototype tank, plus the HC-SR04 mounting offset. Enter it with `PUT /trucks/{id}/tank`; the simulator's demo tank (30 × 20 × 25 cm) is only a placeholder.
 - **Connectivity:** how does the ESP32 get online while the truck moves — WiFi (phone hotspot) or a cellular modem (e.g. SIM800L / A7670)? This affects firmware and TLS memory budget.
 - **Broker + DB hosting:** proposed HiveMQ Cloud Serverless (MQTT, TLS 8883) and Neon (Postgres), both free. Render can't host a broker, and its free Postgres expires. Confirm.
-- **Delivery zones:** are approved discharge locations defined per trip or per truck, and who enters them? Needed for the "discharge outside zone" rule.
+- ~~**Delivery zones**~~ — answered 2026-10-16: geofences are drawn on the map (point + radius) by an operator/admin, per truck or for the whole fleet.
 - **Scope:** keep Web3 anchoring for a later phase? Keep the 3D truck view at all?
 
 ### Earlier (v1)
@@ -109,6 +129,10 @@ Update this file after every meaningful implementation change.
 - **2026-10-16 — Valve is local-only.** The ESP32 opens and closes the FDP-270A valve itself. The software stack stays read-only towards the truck: no command topic, and the dashboard only shows the reported `valve_open` state.
 - **2026-10-16 — Device sends raw `distance_cm`**; the backend converts it to level/volume using a per-truck tank calibration, so recalibration never needs a reflash.
 - **2026-10-16 — Free hosting target:** Vercel (frontend) + Render (backend). Redis and the TimescaleDB requirement were dropped as unnecessary at this scale.
+- **2026-10-16 — Dashboard login** is email + password with JWT; no public sign-up (admins create users). Roles admin / operator / viewer.
+- **2026-10-16 — Geofence rule:** the valve may only open inside an active geofence (point + radius) for the truck. Opening it anywhere else, or without a GPS fix, raises a critical alert and records an unauthorized discharge. The prototype's test button forces the valve open to exercise this. Detection only — the backend never commands the valve.
+- **2026-10-16 — Clean vs unexpected offline:** `online:false` with `ts` = clean shutdown (activity log only); without `ts` = MQTT Last Will → `device_offline` alert.
+- **2026-10-16 — Reports are generated on demand** from stored data (discharges, alerts, telemetry, audit log) as CSV/JSON; nothing is precomputed.
 
 - MQTT chosen for device telemetry: lightweight pub/sub, widely supported on embedded hardware.
 - TimescaleDB (Postgres extension) for time-series + relational data in one database.
@@ -120,6 +144,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-16 — Backend v2 built.** See "Backend v2 — Built and verified" above. Local `.env` now points at a new `petroeye` database and has dev-only `ADMIN_EMAIL`/`ADMIN_PASSWORD`/`JWT_SECRET`. Run `uv run alembic upgrade head` on any other database before starting. Only one backend may run per `MQTT_CLIENT_ID` (two `--reload` servers kicked each other off the broker during testing).
 
 - **2026-10-16 — Split into two repos.** The monorepo became two independent repos: **backend** (FastAPI, simulator, docker-compose + Mosquitto config, system docs; Render) and **frontend** (Next.js, `ui-context.md`, frontend code standards; Vercel). The simulator now runs from the backend's uv environment (`uv run python simulation/truck_simulator.py`). Removed the uv workspace root, hello-world `main.py` files, `_check_db.py` (hardcoded DB credentials) and an empty `contracts/`. Each repo has its own `.gitignore` that excludes `.env` files. The old root git history (one commit) is no longer used.
 - **Cross-repo rule:** the frontend's `lib/types.ts` mirrors this API. Any REST/WS shape change here gets a note in this file so the frontend can follow.

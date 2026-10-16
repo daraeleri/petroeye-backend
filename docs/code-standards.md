@@ -3,7 +3,7 @@
 ## General
 
 - Keep MQTT ingestion, the AI/rule engine, and the Web3 anchoring service decoupled — each is a swappable module behind a small interface.
-- Favor small, single-purpose functions for domain logic (e.g. `evaluate_fuel_drop_rate()`, `detect_tilt_anomaly()`, `hash_alert_payload()`).
+- Favor small, single-purpose functions for domain logic (e.g. `find_containing_fence()`, `volume_from_level()`, `alert_digest()`).
 - No hardware actuation code anywhere in the backend. This system reads; it does not write to the truck.
 
 ## Python / FastAPI

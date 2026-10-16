@@ -2,7 +2,7 @@
 
 This is the contract between the physical truck prototype and the PetroTwin software stack. If you are building/wiring the truck's sensor unit, this file tells you exactly what to publish, where, and in what format. **If anything here needs to change, flag it — don't silently deviate**, since the backend validates against this schema and will reject anything else.
 
-> **Status: schema v2 (target).** v2 replaces the original v1 draft, which assumed temperature/pressure/tilt/flow/hatch sensors the prototype does not have. The backend and simulator still only accept v1 until the ingestion rewrite lands — see `progress-tracker.md`. Firmware should be written against v2.
+> **Status: schema v2 — implemented** (backend + simulator, 2026-10-16). v2 replaced the original v1 draft, which assumed temperature/pressure/tilt/flow/hatch sensors the prototype does not have. v1 payloads are now rejected. The exact validation lives in `app/mqtt/schemas.py`.
 
 ## 0. Hardware on the Truck
 
@@ -14,6 +14,10 @@ This is the contract between the physical truck prototype and the PetroTwin soft
 | Discharge valve | FDP-270A solenoid valve | Opened/closed **locally by the ESP32 only** |
 
 **Valve control is local.** The ESP32 decides when the valve opens or closes. The backend never sends commands to the truck, and there is no command topic — the dashboard only displays the valve state the device reports.
+
+**Geofence rule.** Operators mark approved discharge locations on the dashboard map (a point + radius). The backend checks every reading: if `valve_open` is `true` while the truck is **not inside an active geofence for that truck** — or while `gps_fix` is `false`, since the location can't be confirmed — it raises a **critical `valve_open_outside_geofence` alert** and records the discharge as unauthorized. One alert per opening (not one per reading); leaving the geofence with the valve still open raises it too.
+
+**Test button.** The prototype has a push button that forces the valve open. Use it to exercise the rule above: press it away from any geofence and the dashboard should show the critical alert within one reading. The firmware just reports the real valve state — it doesn't need to say *why* the valve opened.
 
 **Safety (prototype only):** the HC-SR04 is not sealed or intrinsically safe. Test with water, not petrol. A real fuel tank needs a sealed/ATEX-rated level sensor.
 
@@ -50,7 +54,7 @@ Publish JSON to `petrotwin/{truck_id}/telemetry`. Field names are flat (no neste
 {
   "schema_version": 2,
   "truck_id": "truck-001",
-  "ts": "2026-10-16T10:32:05Z",
+  "ts": "2026-10-16T10:32:05.250Z",
   "gps_fix": true,
   "lat": 3.848012,
   "lon": 11.502134,
@@ -66,16 +70,18 @@ Publish JSON to `petrotwin/{truck_id}/telemetry`. Field names are flat (no neste
 | Field | Type | Required | Unit / Notes |
 | ----- | ---- | -------- | ------------ |
 | `schema_version` | int | yes | `2`. Bump only after coordinating with the backend team. |
-| `truck_id` | string | yes | Must match the topic's `{truck_id}`. |
-| `ts` | string (ISO 8601, UTC, `Z` suffix) | yes | Time the readings were taken. Source: NTP sync at boot, or GPS time once there's a fix. If the device has no valid time from either, don't publish telemetry yet. |
+| `truck_id` | string | yes | Must match the topic's `{truck_id}`. Letters, digits, `-`, `_` only (max 64). |
+| `ts` | string (ISO 8601, UTC, `Z` suffix) | yes | Time the readings were taken, **with milliseconds** (e.g. `2026-10-16T10:32:05.250Z`). Source: NTP sync at boot, or GPS time once there's a fix. If the device has no valid time from either, don't publish telemetry yet. `(truck_id, ts)` identifies a reading: a re-delivered message with the same `ts` is ignored, so two different readings must never share a timestamp. |
 | `gps_fix` | bool | yes | `true` only when the NEO-6M reports a valid location fix. |
 | `lat`, `lon` | float \| null | yes | WGS84 decimal degrees, 6 decimals. `null` when `gps_fix` is `false` — never send `0,0` or a stale position. |
-| `speed_kmh` | float \| null | yes | Ground speed from GPS. `null` without a fix. |
+| `speed_kmh` | float \| null | yes | Ground speed from GPS, 0–300. `null` without a fix. |
 | `course_deg` | float \| null | yes | Heading 0–360 from GPS. `null` without a fix. |
-| `sats` | int | yes | Satellites in use (0 without a fix). |
+| `sats` | int | yes | Satellites in use, 0–50 (0 without a fix). |
 | `hdop` | float \| null | yes | Horizontal dilution of precision. `null` without a fix. |
 | `distance_cm` | float \| null | yes | HC-SR04 distance from the sensor face to the liquid surface, **median of 5 pings** taken ≥ 60 ms apart. `null` if the echo times out or is outside 2–400 cm. Send raw distance — do **not** convert to level or volume on the device. |
-| `valve_open` | bool | yes | Current commanded state of the solenoid valve (`true` = energised/open). |
+| `valve_open` | bool | yes | Current state of the solenoid valve (`true` = energised/open), whatever opened it — normal logic or the test button. |
+
+Any field not listed here makes the whole message invalid; rejected messages are logged by the backend with the failing field.
 
 **Why raw distance:** the backend converts `distance_cm` → liquid level → volume (litres) using each truck's tank shape, dimensions and sensor mounting offset, stored per truck. Recalibration then never needs a firmware reflash.
 
@@ -106,13 +112,20 @@ Publish to `petrotwin/{truck_id}/status` on connect, at least every 60 seconds, 
 | ----- | ---- | -------- | ----- |
 | `schema_version` | int | yes | `2` |
 | `truck_id` | string | yes | Must match the topic. |
-| `ts` | string (ISO 8601 UTC) | yes | As for telemetry. |
-| `online` | bool | yes | `true` on heartbeats; `false` in the LWT message. |
+| `ts` | string (ISO 8601 UTC) | yes, except in the LWT | As for telemetry. |
+| `online` | bool | yes | `true` on heartbeats; `false` before a clean shutdown and in the LWT message. |
 | `firmware_version` | string | no | Semver of the running firmware. |
 | `rssi_dbm` | int | no | Signal strength of the network link (WiFi or cellular). |
 | `uptime_s` | int | no | Seconds since boot — helps spot brown-out resets. |
 
 Configure MQTT **Last Will and Testament** on this topic with `{"schema_version":2,"truck_id":"truck-001","online":false}` (retain = false, QoS 1). The LWT is the one message allowed to omit `ts`, since it's composed at connect time. This lets the dashboard show "offline" accurately instead of just going stale.
+
+The backend tells the two offline cases apart by `ts`:
+
+| Message | Meaning | Result |
+| ------- | ------- | ------ |
+| `online: false` **with** `ts` (published by the device) | Clean shutdown | Truck shown offline, logged in the activity report, **no alert** |
+| `online: false` **without** `ts` (the LWT, published by the broker) | Device dropped off unexpectedly (power loss, network loss, crash) | Truck shown offline + `device_offline` warning alert |
 
 ## 5. What NOT to Do
 
@@ -131,7 +144,7 @@ Validate your payload format against the dev broker with `mosquitto_pub` before 
 mosquitto_pub -h localhost -p 1883 \
   -u "truck-001" -P "<device-password>" \
   -t "petrotwin/truck-001/telemetry" \
-  -m '{"schema_version":2,"truck_id":"truck-001","ts":"2026-10-16T10:32:05Z","gps_fix":true,"lat":3.848012,"lon":11.502134,"speed_kmh":42.5,"course_deg":187.0,"sats":8,"hdop":1.1,"distance_cm":37.4,"valve_open":false}'
+  -m '{"schema_version":2,"truck_id":"truck-001","ts":"2026-10-16T10:32:05.250Z","gps_fix":true,"lat":3.848012,"lon":11.502134,"speed_kmh":42.5,"course_deg":187.0,"sats":8,"hdop":1.1,"distance_cm":37.4,"valve_open":false}'
 ```
 
 If it's accepted, you'll see the truck update live on the dashboard. If it's rejected, the backend logs show which field failed validation — check there first before asking.
@@ -145,6 +158,7 @@ If it's accepted, you'll see the truck update live on the dashboard. If it's rej
 - [ ] Heartbeat/status topic publishing on the expected interval.
 - [ ] LWT configured.
 - [ ] Valve state change triggers an immediate telemetry publish.
+- [ ] Test button pressed away from any geofence → critical alert on the dashboard; pressed inside the depot geofence → authorized discharge, no alert.
 - [ ] Confirmed with the software team which `schema_version` is currently expected.
 
 ## Escalation

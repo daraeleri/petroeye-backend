@@ -1,0 +1,38 @@
+# Render Blueprint for the PetroTwin backend (free web service).
+# Database: managed Postgres elsewhere (e.g. Neon) — paste its URL into DATABASE_URL.
+# MQTT: managed broker (e.g. HiveMQ Cloud, TLS 8883) — Render can't host a broker.
+# Free instances sleep after ~15 min without HTTP traffic: point an uptime
+# pinger (UptimeRobot, cron-job.org) at /health every 10 minutes.
+services:
+  - type: web
+    name: petroeye-backend
+    runtime: python
+    plan: free
+    buildCommand: pip install uv && uv sync --frozen --no-dev
+    startCommand: uv run --no-dev alembic upgrade head && uv run --no-dev uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: MQTT_HOST
+        sync: false
+      - key: MQTT_PORT
+        value: "8883"
+      - key: MQTT_TLS
+        value: "true"
+      - key: MQTT_USERNAME
+        sync: false
+      - key: MQTT_PASSWORD
+        sync: false
+      - key: MQTT_CLIENT_ID
+        value: petrotwin-backend-render
+      - key: CORS_ORIGINS
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: AUTO_REGISTER_TRUCKS
+        value: "true"

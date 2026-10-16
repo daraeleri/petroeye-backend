@@ -1,32 +1,55 @@
 """
 Pydantic schemas mirroring the payload contract in
-docs/hardware-integration-guide.md EXACTLY. If you change a field here,
-update that doc in the same change — it's the physical prototype team's
-source of truth.
+docs/hardware-integration-guide.md (schema v2) EXACTLY. If you change a
+field here, update that doc and the simulator in the same change — it's the
+ESP32 firmware's source of truth.
+
+Unknown fields are rejected (`extra="forbid"`), so a firmware typo shows
+up as a logged rejection instead of silently missing data.
 """
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+TRUCK_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 
 class TelemetryPayload(BaseModel):
-    schema_version: int = 1
-    truck_id: str
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2]
+    truck_id: str = Field(pattern=TRUCK_ID_PATTERN)
     ts: datetime
-    fuel_level_pct: float = Field(ge=0, le=100)
-    temperature_c: float
-    pressure_kpa: float = Field(ge=0)
-    lat: float
-    lon: float
-    tilt_deg: float = Field(ge=0, le=90)
-    flow_rate_lpm: float = Field(ge=0)
-    hatch_open: bool = False
+    gps_fix: bool
+    lat: float | None = Field(ge=-90, le=90)
+    lon: float | None = Field(ge=-180, le=180)
+    speed_kmh: float | None = Field(ge=0, le=300)
+    course_deg: float | None = Field(ge=0, le=360)
+    sats: int = Field(ge=0, le=50)
+    hdop: float | None = Field(ge=0)
+    distance_cm: float | None = Field(ge=0, le=500)
+    valve_open: bool
+
+    @model_validator(mode="after")
+    def _fix_consistency(self) -> "TelemetryPayload":
+        if self.gps_fix and (self.lat is None or self.lon is None):
+            raise ValueError("gps_fix is true but lat/lon are null")
+        if not self.gps_fix and (self.lat is not None or self.lon is not None):
+            raise ValueError("gps_fix is false but lat/lon are set — send null without a fix")
+        if self.ts.tzinfo is None:
+            raise ValueError("ts must be UTC with a 'Z' suffix (timezone-aware)")
+        return self
 
 
 class StatusPayload(BaseModel):
-    schema_version: int = 1
-    truck_id: str
-    ts: datetime
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2]
+    truck_id: str = Field(pattern=TRUCK_ID_PATTERN)
+    # Optional only so the MQTT Last Will (composed at connect time) can omit it.
+    ts: datetime | None = None
     online: bool
-    battery_pct: int | None = None
-    firmware_version: str | None = None
+    firmware_version: str | None = Field(default=None, max_length=32)
+    rssi_dbm: int | None = Field(default=None, ge=-150, le=0)
+    uptime_s: int | None = Field(default=None, ge=0)

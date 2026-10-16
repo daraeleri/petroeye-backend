@@ -1,58 +1,104 @@
 # PetroTwin Backend
 
-FastAPI backend: REST + WebSocket API, async MQTT ingestion, Phase 1 rule-based
-anomaly detection, and a stubbed Web3 anchoring queue. See `docs/architecture.md`
-for the full system boundaries this code follows.
+FastAPI service for **PetroTwin**, the digital twin of a petrol tanker truck. The truck
+is an ESP32 with a NEO-6M GPS, an HC-SR04 ultrasonic level sensor and an FDP-270A
+solenoid valve; it publishes telemetry over MQTT.
+
+What this service does:
+
+- **Login** with email + password (JWT), roles `admin` / `operator` / `viewer`.
+- **Ingests MQTT telemetry** (schema v2): GPS, valve state, ultrasonic distance → tank
+  **level and volume** from each truck's tank calibration.
+- **Geofences** (point + radius on the map): the valve may only open inside one. Opening
+  it anywhere else (e.g. with the prototype's test button) raises a **critical alert**.
+- **Alerts**: valve opened outside geofence, volume drop with valve closed (leak/theft),
+  GPS fix lost, level sensor no echo, device dropped off (MQTT Last Will).
+- **Discharge sessions**: every valve open → close, authorized or not, litres.
+- **Reports**: summary, activity timeline, CSV/JSON export of discharges, alerts,
+  telemetry and the audit log.
+- **Live WebSocket** feed for the dashboard.
+
+The system is **read-only towards the truck**: the ESP32 controls the valve locally and
+the backend never publishes to device topics.
+
+API docs: run the server and open **http://localhost:8000/docs** (Swagger UI; click
+**Authorize** and log in with your email/password) or `/redoc`.
 
 ## Setup
 
-```bash
-uv sync                       # installs dependencies from pyproject.toml
-cp .env.example .env          # then edit .env with your real DATABASE_URL / MQTT creds
-```
-
-## Run
-
-Make sure Mosquitto and Postgres are running first (`docker compose up -d` in this repo starts both),
-then:
+Requirements: [uv](https://docs.astral.sh/uv/), Python 3.11, Postgres, an MQTT broker
+(`docker compose up -d` starts Mosquitto + Postgres locally; a native install works too).
 
 ```bash
+uv sync
+cp .env.example .env                 # set DATABASE_URL, ADMIN_EMAIL/ADMIN_PASSWORD, JWT_SECRET
+uv run alembic upgrade head          # create/upgrade the database schema
 uv run uvicorn app.main:app --reload
 ```
 
-On startup this will:
-1. Create DB tables if they don't exist (`init_db()` — a stand-in for real
-   Alembic migrations; run `uv run alembic init alembic` once the schema
-   stabilizes and switch over).
-2. Connect to the MQTT broker and subscribe to `petrotwin/+/telemetry` and `petrotwin/+/status`.
-3. Start the (currently stubbed) Web3 anchoring queue worker.
+On startup the service creates the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`
+(only if there are no users yet), connects to MQTT (retrying in the background if the
+broker is down) and subscribes to `petrotwin/+/telemetry` and `petrotwin/+/status`.
 
-## Verify it's working end to end
+Only **one** backend instance per `MQTT_CLIENT_ID` may run at a time; two instances with
+the same ID keep disconnecting each other.
 
-With `simulation/truck_simulator.py` running against the same broker:
+## Try it with the simulator
 
 ```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/trucks
-curl http://localhost:8000/trucks/truck-001/telemetry
-curl http://localhost:8000/alerts
+# 1. Register the demo trucks, calibrate their tanks, create the depot geofence:
+uv run python simulation/seed_demo.py --api http://localhost:8000 --email <admin> --password <pw>
+# 2. Run a fleet (normal delivery, forced/unauthorized opening, leak, GPS loss):
+uv run python simulation/fleet_runner.py
 ```
 
-`/trucks` and `/trucks/truck-001/telemetry` should start returning data within
-a few seconds of the simulator running. Try `--scenario fuel_leak` or
-`--scenario overheat` on the simulator to see `/alerts` populate — check the
-uvicorn console log too, anomaly detections are logged with the feature
-values that triggered them.
+See `simulation/README.md` for scenarios.
 
-## What's stubbed / not yet implemented
+## Tests
 
-- **Alembic migrations**: currently using `create_all` on startup. Fine for
-  early dev, not for anything with real data you care about.
-- **Web3 anchoring**: `app/web3/anchoring.py` logs what it would anchor but
-  doesn't submit a real transaction yet — no contract is deployed. See the
-  TODO in that file and `@web3-blockchain`'s scope in `AGENTS.md`.
-- **Phase 2 ML anomaly scoring**: not started. `app/ai/rule_engine.py` is
-  Phase 1 (threshold-based) only, per `docs/progress-tracker.md`.
-- **Auth**: no JWT/user auth wired up yet on the REST/WS endpoints.
-- **Per-device MQTT credentials**: the `devices` table exists but nothing
-  enforces per-truck auth yet — the dev broker currently allows anonymous connections.
+```bash
+uv run pytest
+```
+
+Tests use a temporary SQLite database and no broker.
+
+## Database migrations
+
+Schema changes go through Alembic, never `create_all`:
+
+```bash
+uv run alembic revision --autogenerate -m "describe the change"
+uv run alembic upgrade head
+```
+
+## Deploy (Render, free)
+
+`render.yaml` is a Render Blueprint. In Render: **New → Blueprint**, pick this repo, then
+fill the secret env vars:
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL` | Neon (or other) Postgres URL — `postgres://…?sslmode=require` is accepted |
+| `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` | HiveMQ Cloud cluster + credentials (TLS 8883 is preset) |
+| `CORS_ORIGINS` | The Vercel dashboard URL |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin account |
+
+`JWT_SECRET` is generated by Render. The start command runs migrations, then the server.
+Free instances sleep after ~15 minutes without HTTP traffic; point an uptime pinger at
+`/health` every 10 minutes. While asleep, the broker holds QoS 1 messages for the
+backend's persistent session and delivers them on reconnect.
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `app/api/routes/` | REST endpoints (auth, users, trucks, geofences, alerts, discharges, reports, health) |
+| `app/mqtt/` | MQTT client + payload schemas (the device contract) |
+| `app/services/ingestion.py` | Orchestration: telemetry → volume, geofence, rules, discharges, DB, WebSocket |
+| `app/ai/` | Rule engine + `rules.yaml` thresholds |
+| `app/domain/` | Pure geofence and tank-volume maths |
+| `app/db/`, `migrations/` | SQLAlchemy models, Alembic migrations |
+| `app/ws/` | WebSocket endpoint and broadcaster |
+| `app/web3/` | Anchoring queue (stub) |
+| `simulation/` | Truck simulator, fleet runner, demo seeder |
+| `docs/` | Architecture, device contract (`hardware-integration-guide.md`), progress |

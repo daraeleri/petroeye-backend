@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-PetroTwin truck telemetry simulator.
+PetroTwin truck simulator (schema v2).
 
-Publishes JSON telemetry to an MQTT broker exactly as a real truck device
-should, per docs/hardware-integration-guide.md. Use this to develop and
-demo the entire stack without physical hardware.
+Publishes telemetry and status over MQTT exactly as the ESP32 prototype
+should, per docs/hardware-integration-guide.md: NEO-6M GPS fields, the
+HC-SR04 distance (median-filtered), and the solenoid valve state. Use it to
+run and demo the whole stack without hardware.
 
-Usage:
-    python truck_simulator.py --truck-id truck-001 --scenario normal
-    python truck_simulator.py --truck-id truck-002 --scenario fuel_leak --broker localhost --port 1883
-    python truck_simulator.py --truck-id truck-003 --scenario overheat --interval 2
+The simulated tank matches the demo calibration set by `seed_demo.py`
+(rectangular 30 × 20 × 25 cm, sensor reads 3 cm when full → 15 L).
 
-Requires: pip install paho-mqtt
+Usage (from the backend repo root):
+    uv run python simulation/truck_simulator.py --truck-id truck-001 --scenario delivery
+    uv run python simulation/truck_simulator.py --truck-id truck-002 --scenario unauthorized_discharge
 """
 
 import argparse
@@ -19,235 +20,254 @@ import json
 import math
 import random
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 try:
     import paho.mqtt.client as mqtt
+    from paho.mqtt.enums import CallbackAPIVersion
 except ImportError:
-    raise SystemExit("Missing dependency. Run: pip install paho-mqtt")
+    raise SystemExit("Missing dependency. Run from the backend repo root: uv run python simulation/truck_simulator.py")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-# A small set of plausible starting points around Yaoundé, Cameroon,
-# purely so simulated GPS traces look reasonable on a map.
+# Yaoundé, Cameroon — purely so traces look plausible on the map.
 START_LAT, START_LON = 3.8480, 11.5021
+# The demo depot; seed_demo.py creates a fleet-wide geofence here.
+DEPOT_LAT, DEPOT_LON = 3.8667, 11.5167
+DEPOT_RADIUS_M = 100
+
+# Demo tank (must match seed_demo.py's calibration).
+TANK_LENGTH_CM, TANK_WIDTH_CM, TANK_HEIGHT_CM = 30.0, 20.0, 25.0
+SENSOR_OFFSET_CM = 3.0
+TANK_CAPACITY_L = TANK_LENGTH_CM * TANK_WIDTH_CM * TANK_HEIGHT_CM / 1000  # 15 L
+
+EARTH_R = 6_371_008.8
 
 
-class TruckState:
-    """Holds the evolving 'true' state of one simulated truck."""
+def haversine_m(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = p2 - p1, math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * EARTH_R * math.asin(math.sqrt(a))
 
-    def __init__(self, truck_id: str, scenario: str):
+
+def bearing_deg(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    x = math.sin(dl) * math.cos(p2)
+    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
+
+
+def utc_ts() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+class Truck:
+    def __init__(self, truck_id: str, scenario: str, interval: float, speed_kmh: float):
         self.truck_id = truck_id
         self.scenario = scenario
-        self.fuel_level_pct = 95.0
-        self.temperature_c = 50.0
-        self.pressure_kpa = 101.3
-        self.lat = START_LAT + random.uniform(-0.01, 0.01)
-        self.lon = START_LON + random.uniform(-0.01, 0.01)
-        self.tilt_deg = 0.5
-        self.flow_rate_lpm = 0.0
-        self.hatch_open = False
+        self.interval = interval
+        self.cruise_kmh = speed_kmh
+        self.lat = START_LAT + random.uniform(-0.002, 0.002)
+        self.lon = START_LON + random.uniform(-0.002, 0.002)
+        self.home = (self.lat, self.lon)
+        self.speed_kmh = 0.0
+        self.course = 0.0
+        self.volume_l = TANK_CAPACITY_L * 0.95
+        self.valve_open = False
+        self.gps_fix = True
+        self.echo = True
         self.tick = 0
+        self.phase = "drive_out"
+        self.phase_ticks = 0
+        self.forced_open_done = False
+
+    # --- movement ------------------------------------------------------------
+
+    def _drive_towards(self, lat, lon) -> bool:
+        """Move one tick towards (lat, lon). Returns True on arrival."""
+        dist = haversine_m(self.lat, self.lon, lat, lon)
+        step = self.cruise_kmh / 3.6 * self.interval
+        self.course = bearing_deg(self.lat, self.lon, lat, lon)
+        if dist <= step:
+            self.lat, self.lon, self.speed_kmh = lat, lon, 0.0
+            return True
+        f = step / dist
+        self.lat += (lat - self.lat) * f + random.uniform(-0.00002, 0.00002)
+        self.lon += (lon - self.lon) * f + random.uniform(-0.00002, 0.00002)
+        self.speed_kmh = self.cruise_kmh + random.uniform(-4, 4)
+        return False
+
+    def _set_phase(self, phase):
+        self.phase, self.phase_ticks = phase, 0
+
+    # --- scenarios -----------------------------------------------------------
+
+    def _delivery_cycle(self, forced_stop_halfway: bool):
+        """Drive to the depot, discharge inside the geofence, return, refill.
+
+        With forced_stop_halfway, the truck first stops halfway and the valve
+        is forced open (the prototype's test button) → unauthorized discharge.
+        """
+        self.phase_ticks += 1
+        if self.phase == "drive_out":
+            if forced_stop_halfway and not self.forced_open_done:
+                total = haversine_m(*self.home, DEPOT_LAT, DEPOT_LON)
+                if haversine_m(self.lat, self.lon, DEPOT_LAT, DEPOT_LON) < total / 2:
+                    self.speed_kmh = 0.0
+                    self._set_phase("forced_open")
+                    return
+            if self._drive_towards(DEPOT_LAT, DEPOT_LON):
+                self._set_phase("arrived")
+        elif self.phase == "forced_open":
+            # Test button pressed: valve forced open outside the geofence.
+            self.valve_open = self.phase_ticks <= 4
+            if self.valve_open:
+                self.volume_l -= 0.25
+            if self.phase_ticks > 6:
+                self.forced_open_done = True
+                self._set_phase("drive_out")
+        elif self.phase == "arrived":
+            self.speed_kmh = 0.0
+            if self.phase_ticks >= 2:
+                self._set_phase("discharging")
+        elif self.phase == "discharging":
+            self.valve_open = True
+            self.volume_l -= 0.6
+            if self.volume_l <= TANK_CAPACITY_L * 0.15 or self.phase_ticks >= 15:
+                self.valve_open = False
+                self._set_phase("drive_back")
+        elif self.phase == "drive_back":
+            if self._drive_towards(*self.home):
+                self._set_phase("refill")
+        elif self.phase == "refill":
+            self.speed_kmh = 0.0
+            self.volume_l = min(TANK_CAPACITY_L * 0.95, self.volume_l + 1.5)
+            if self.volume_l >= TANK_CAPACITY_L * 0.95:
+                self.forced_open_done = False
+                self._set_phase("drive_out")
 
     def step(self):
-        """Advance the truck's state by one tick according to its scenario."""
         self.tick += 1
-        scenario_fn = SCENARIOS.get(self.scenario, scenario_normal)
-        scenario_fn(self)
+        if self.scenario == "delivery":
+            self._delivery_cycle(forced_stop_halfway=False)
+        elif self.scenario == "unauthorized_discharge":
+            self._delivery_cycle(forced_stop_halfway=True)
+        elif self.scenario == "leak":
+            # Parked, valve closed, tank slowly emptying.
+            self.speed_kmh = 0.0
+            self.volume_l -= 0.45 if self.tick > 5 else 0.0
+            if self.volume_l < 1:
+                self.volume_l = TANK_CAPACITY_L * 0.9
+        elif self.scenario == "gps_loss":
+            self._delivery_cycle(forced_stop_halfway=False)
+            self.gps_fix = (self.tick % 20) < 15
+        elif self.scenario == "sensor_dropout":
+            self._delivery_cycle(forced_stop_halfway=False)
+            self.echo = (self.tick % 25) < 20
+        elif self.scenario == "parked":
+            self.speed_kmh = 0.0
+        self.volume_l = max(0.0, min(TANK_CAPACITY_L, self.volume_l))
 
-        # Gentle route drift for every scenario, so the truck always "moves."
-        self.lat += random.uniform(-0.0005, 0.0005)
-        self.lon += random.uniform(-0.0005, 0.0005)
+    # --- payloads --------------------------------------------------------------
 
-        # Clamp to physically sane ranges.
-        self.fuel_level_pct = max(0.0, min(100.0, self.fuel_level_pct))
-        self.temperature_c = max(-10.0, min(150.0, self.temperature_c))
-        self.pressure_kpa = max(0.0, min(300.0, self.pressure_kpa))
-        self.tilt_deg = max(0.0, min(90.0, self.tilt_deg))
-        self.flow_rate_lpm = max(0.0, self.flow_rate_lpm)
+    def distance_cm(self):
+        if not self.echo:
+            return None
+        level = self.volume_l * 1000 / (TANK_LENGTH_CM * TANK_WIDTH_CM)
+        # Median of 5 noisy pings, like the firmware does.
+        pings = sorted(SENSOR_OFFSET_CM + (TANK_HEIGHT_CM - level) + random.gauss(0, 0.3) for _ in range(5))
+        return round(pings[2], 1)
 
-    def to_payload(self) -> dict:
+    def telemetry(self) -> dict:
+        fix = self.gps_fix
         return {
             "schema_version": SCHEMA_VERSION,
             "truck_id": self.truck_id,
-            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "fuel_level_pct": round(self.fuel_level_pct, 2),
-            "temperature_c": round(self.temperature_c, 2),
-            "pressure_kpa": round(self.pressure_kpa, 2),
-            "lat": round(self.lat, 6),
-            "lon": round(self.lon, 6),
-            "tilt_deg": round(self.tilt_deg, 2),
-            "flow_rate_lpm": round(self.flow_rate_lpm, 2),
-            "hatch_open": self.hatch_open,
+            "ts": utc_ts(),
+            "gps_fix": fix,
+            "lat": round(self.lat, 6) if fix else None,
+            "lon": round(self.lon, 6) if fix else None,
+            "speed_kmh": round(max(0.0, self.speed_kmh), 1) if fix else None,
+            "course_deg": round(self.course, 1) if fix else None,
+            "sats": random.randint(6, 10) if fix else 0,
+            "hdop": round(random.uniform(0.8, 1.6), 2) if fix else None,
+            "distance_cm": self.distance_cm(),
+            "valve_open": self.valve_open,
         }
 
-    def status_payload(self, online: bool = True) -> dict:
+    def status(self, online: bool = True) -> dict:
         return {
             "schema_version": SCHEMA_VERSION,
             "truck_id": self.truck_id,
-            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ts": utc_ts(),
             "online": online,
-            "battery_pct": max(0, 100 - self.tick // 20),
-            "firmware_version": "0.1.0-sim",
+            "firmware_version": "0.2.0-sim",
+            "rssi_dbm": random.randint(-80, -55),
+            "uptime_s": int(self.tick * self.interval),
         }
 
 
-# ---------------------------------------------------------------------------
-# Scenarios. Each function mutates a TruckState in place for one tick.
-# Add new scenarios here AND in docs/skills-recommendations.md's
-# mqtt-scenario-simulator notes if the behavior needs documenting further.
-# ---------------------------------------------------------------------------
-
-def scenario_normal(s: TruckState):
-    """Normal transit: slow fuel burn, stable temp/pressure, no anomalies."""
-    s.fuel_level_pct -= 0.03 + random.uniform(0, 0.02)
-    s.temperature_c += random.uniform(-0.3, 0.3)
-    s.pressure_kpa += random.uniform(-0.2, 0.2)
-    s.tilt_deg = abs(random.gauss(1.0, 0.5))
-    s.flow_rate_lpm = 0.0
-    s.hatch_open = False
-
-
-def scenario_fuel_leak(s: TruckState):
-    """Fuel drops far faster than normal burn rate — should trip a rule alert."""
-    s.fuel_level_pct -= 0.6 + random.uniform(0, 0.3)
-    s.temperature_c += random.uniform(-0.2, 0.2)
-    s.pressure_kpa -= 0.1
-    s.tilt_deg = abs(random.gauss(1.0, 0.5))
-    s.flow_rate_lpm = round(random.uniform(1.5, 3.0), 2)
-    s.hatch_open = False
-
-
-def scenario_overheat(s: TruckState):
-    """Temperature climbs steadily toward a dangerous range."""
-    s.temperature_c += 0.7 + random.uniform(0, 0.3)
-    s.pressure_kpa += 0.3  # pressure rises with heat
-    s.fuel_level_pct -= 0.03
-    s.tilt_deg = abs(random.gauss(1.0, 0.5))
-    s.flow_rate_lpm = 0.0
-    s.hatch_open = False
-
-
-def scenario_rollover_risk(s: TruckState):
-    """Tilt angle climbs sharply — simulates a sharp turn / uneven terrain risk."""
-    s.tilt_deg += random.uniform(1.0, 4.0)
-    s.fuel_level_pct -= 0.03
-    s.temperature_c += random.uniform(-0.2, 0.2)
-    s.flow_rate_lpm = 0.0
-    s.hatch_open = False
-
-
-def scenario_tamper(s: TruckState):
-    """Hatch opens unexpectedly while stationary — simulates unauthorized access."""
-    s.hatch_open = True if s.tick % 5 != 0 else False
-    s.fuel_level_pct -= random.uniform(0.1, 0.4)  # possible siphoning
-    s.temperature_c += random.uniform(-0.2, 0.2)
-    s.tilt_deg = abs(random.gauss(0.5, 0.3))
-    s.flow_rate_lpm = round(random.uniform(0.5, 1.5), 2)
-
-
-def scenario_sensor_dropout(s: TruckState):
-    """Occasionally emits clearly-flagged stale/frozen-looking readings.
-
-    Note: real dropouts usually mean *no message at all*. This scenario
-    instead sends repeated identical values to exercise "stale data" style
-    detection separately from a true connection loss (use --offline for that).
-    """
-    if s.tick % 10 < 3:
-        pass  # freeze state this tick (don't update anything)
-    else:
-        scenario_normal(s)
-
-
-def scenario_gps_route_deviation(s: TruckState):
-    """Truck drifts far from the expected corridor — simulates route deviation."""
-    s.lat += random.uniform(0.01, 0.02) * random.choice([-1, 1])
-    s.lon += random.uniform(0.01, 0.02) * random.choice([-1, 1])
-    s.fuel_level_pct -= 0.05
-    s.temperature_c += random.uniform(-0.2, 0.5)
-    s.tilt_deg = abs(random.gauss(1.0, 0.5))
-    s.flow_rate_lpm = 0.0
-    s.hatch_open = False
-
-
-SCENARIOS = {
-    "normal": scenario_normal,
-    "fuel_leak": scenario_fuel_leak,
-    "overheat": scenario_overheat,
-    "rollover_risk": scenario_rollover_risk,
-    "tamper": scenario_tamper,
-    "sensor_dropout": scenario_sensor_dropout,
-    "gps_route_deviation": scenario_gps_route_deviation,
-}
+SCENARIOS = ["delivery", "unauthorized_discharge", "leak", "gps_loss", "sensor_dropout", "parked"]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="PetroTwin truck telemetry simulator")
-    parser.add_argument("--truck-id", default="truck-001", help="Truck ID (matches the MQTT topic)")
-    parser.add_argument("--scenario", default="normal", choices=sorted(SCENARIOS.keys()),
-                         help="Fault scenario to simulate")
+    parser = argparse.ArgumentParser(description="PetroTwin truck simulator (schema v2)")
+    parser.add_argument("--truck-id", default="truck-001", help="Truck ID (used in the MQTT topic)")
+    parser.add_argument("--scenario", default="delivery", choices=SCENARIOS)
     parser.add_argument("--broker", default="localhost", help="MQTT broker host")
-    parser.add_argument("--port", type=int, default=1883, help="MQTT broker port")
+    parser.add_argument("--port", type=int, default=1883, help="MQTT broker port (8883 with --tls)")
+    parser.add_argument("--tls", action="store_true", help="Use TLS (managed brokers such as HiveMQ Cloud)")
     parser.add_argument("--username", default=None, help="Device MQTT username")
     parser.add_argument("--password", default=None, help="Device MQTT password")
     parser.add_argument("--interval", type=float, default=3.0, help="Seconds between telemetry publishes")
-    parser.add_argument("--status-every", type=int, default=10,
-                         help="Publish a status/heartbeat message every N telemetry ticks")
+    parser.add_argument("--speed-kmh", type=float, default=60.0, help="Cruise speed")
+    parser.add_argument("--status-every", type=int, default=10, help="Heartbeat every N ticks")
+    parser.add_argument("--ticks", type=int, default=None, help="Stop after N ticks (default: run forever)")
     parser.add_argument("--offline-after", type=int, default=None,
-                         help="If set, simulate a hard disconnect (no LWT) after N ticks, to test offline detection")
+                        help="Simulate a hard disconnect (broker fires the Last Will) after N ticks")
     args = parser.parse_args()
 
-    state = TruckState(args.truck_id, args.scenario)
+    truck = Truck(args.truck_id, args.scenario, args.interval, args.speed_kmh)
+    status_topic = f"petrotwin/{args.truck_id}/status"
+    telemetry_topic = f"petrotwin/{args.truck_id}/telemetry"
 
-    client = mqtt.Client(client_id=f"truck-{args.truck_id}-sim")
+    client = mqtt.Client(CallbackAPIVersion.VERSION2, client_id=f"truck-{args.truck_id}")
     if args.username:
         client.username_pw_set(args.username, args.password)
-
-    # Last Will and Testament: if this simulator dies uncleanly, the broker
-    # publishes an offline status on our behalf, matching what real hardware
-    # should also configure per docs/hardware-integration-guide.md.
-    lwt_payload = json.dumps({
-        "schema_version": SCHEMA_VERSION,
-        "truck_id": args.truck_id,
-        "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "online": False,
-        "battery_pct": None,
-        "firmware_version": "0.1.0-sim",
-    })
-    client.will_set(f"petrotwin/{args.truck_id}/status", lwt_payload, qos=1, retain=False)
-
-    print(f"[sim] Connecting to {args.broker}:{args.port} as {args.truck_id} (scenario={args.scenario})")
-    client.connect(args.broker, args.port, keepalive=60)
+    if args.tls:
+        client.tls_set()
+    client.will_set(status_topic, json.dumps({"schema_version": SCHEMA_VERSION, "truck_id": args.truck_id,
+                                              "online": False}), qos=1)
+    client.connect(args.broker, args.port, keepalive=15)
     client.loop_start()
+    client.publish(status_topic, json.dumps(truck.status(True)), qos=1)
+    print(f"[{args.truck_id}] scenario={args.scenario} -> {args.broker}:{args.port}")
 
-    telemetry_topic = f"petrotwin/{args.truck_id}/telemetry"
-    status_topic = f"petrotwin/{args.truck_id}/status"
-
+    last_valve = truck.valve_open
     try:
-        while True:
-            if args.offline_after and state.tick >= args.offline_after:
-                print(f"[sim] Simulating hard disconnect after {state.tick} ticks.")
-                client.loop_stop()
-                client._sock_close() if hasattr(client, "_sock_close") else None
-                break
-
-            state.step()
-            payload = state.to_payload()
+        while args.ticks is None or truck.tick < args.ticks:
+            truck.step()
+            payload = truck.telemetry()
             client.publish(telemetry_topic, json.dumps(payload), qos=1)
-            print(f"[sim] {telemetry_topic} -> {payload}")
-
-            if state.tick % args.status_every == 0:
-                status = state.status_payload(online=True)
-                client.publish(status_topic, json.dumps(status), qos=1)
-                print(f"[sim] {status_topic} -> {status}")
-
+            if truck.valve_open != last_valve:
+                print(f"[{args.truck_id}] valve {'OPEN' if truck.valve_open else 'closed'} "
+                      f"(phase={truck.phase}, {truck.volume_l:.1f} L)")
+                last_valve = truck.valve_open
+            if truck.tick % args.status_every == 0:
+                client.publish(status_topic, json.dumps(truck.status(True)), qos=1)
+            if args.offline_after and truck.tick >= args.offline_after:
+                print(f"[{args.truck_id}] simulating hard disconnect (LWT)")
+                client._sock_close()  # abrupt: no DISCONNECT packet → broker publishes the Last Will
+                return
             time.sleep(args.interval)
     except KeyboardInterrupt:
-        print("\n[sim] Stopped by user. Publishing clean offline status.")
-        client.publish(status_topic, json.dumps(state.status_payload(online=False)), qos=1)
-        time.sleep(0.5)
-        client.loop_stop()
-        client.disconnect()
+        pass
+    client.publish(status_topic, json.dumps(truck.status(False)), qos=1).wait_for_publish(5)
+    client.disconnect()
+    client.loop_stop()
+    print(f"[{args.truck_id}] stopped")
 
 
 if __name__ == "__main__":
