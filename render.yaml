@@ -1,7 +1,8 @@
 # Render Blueprint for the PetroTwin backend (free web service).
 # Database: Neon project petroEye (us-east-1). DATABASE_URL = pooled URL (app traffic),
 # DATABASE_URL_UNPOOLED = direct URL (Alembic migrations; must not go through PgBouncer).
-# MQTT: managed broker (e.g. HiveMQ Cloud, TLS 8883) — Render can't host a broker.
+# MQTT: EMQX Cloud Serverless (free quota, TLS 8883) — Render can't host a broker.
+# Set the EMQX deployment's spend limit to 0 so it pauses instead of billing.
 # Free instances sleep after ~15 min without HTTP traffic: point an uptime
 # pinger (UptimeRobot, cron-job.org) at /health every 10 minutes.
 services:

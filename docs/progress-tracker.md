@@ -20,7 +20,7 @@ Update this file after every meaningful implementation change.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
 6. Frontend → login, one UI tree (drop unused `components/hud/` and the Energy/Analytics mock views), map with geofence drawing, tank volume + valve + GPS twin, alerts with acknowledge, reports/export.
 7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
-8. Deployment → ~~Neon~~ (done 2026-10-16), Render (`render.yaml`), HiveMQ Cloud, Vercel, `/health` keep-alive pinger.
+8. Deployment → ~~Neon~~ (done 2026-10-16), EMQX Cloud Serverless (MQTT), Render (`render.yaml`), Vercel, `/health` keep-alive pinger.
 
 ## API changes for the frontend (2026-10-16)
 
@@ -41,7 +41,7 @@ Update this file after every meaningful implementation change.
 - **Reports**: summary, activity timeline (discharges, alerts, acks, device + user events), CSV/JSON export of activity/discharges/alerts/telemetry/audit; every export is audited.
 - **DB**: 9 tables, Alembic initial migration `552c2a705a9a`; new local database `petroeye` (old v1 data left untouched in `petrotwin`).
 - **Swagger**: overview with login steps, roles table, geofence rule, WebSocket events, MQTT pointer; every endpoint has a summary, description, examples and documented error codes; **Authorize** button logs in with email/password.
-- **Deploy**: `render.yaml` (free plan, migrations on start, `/health` check), `.env.example` documents every setting incl. Neon/HiveMQ.
+- **Deploy**: `render.yaml` (free plan, migrations on start, `/health` check), `.env.example` documents every setting incl. Neon/EMQX.
 - **Tests**: 35 pytest tests (domain maths, rules, payload validation, auth/roles, full ingestion → discharges → alerts → reports flow) on SQLite.
 - **Verified live** against local Postgres 18 + Mosquitto: seeded via API; simulator delivery → authorized discharge, forced opening 1.26 km from the depot → critical alert + unauthorized discharge, leak → one warning, abrupt disconnect → `device_offline`; WebSocket rejects missing token and streams `truck.update` with one.
 
@@ -112,14 +112,14 @@ Update this file after every meaningful implementation change.
 - **Should the ESP32 also block the valve outside a geofence?** Today the backend only detects and alerts (the stack is read-only towards the truck). Blocking on the device would need the geofence list on the ESP32 (e.g. the device fetching it over HTTPS), which is a new device-facing interface — decide before the firmware step.
 - **Tank geometry:** shape (rectangular / vertical cylinder / horizontal cylinder) and inner dimensions of the prototype tank, plus the HC-SR04 mounting offset. Enter it with `PUT /trucks/{id}/tank`; the simulator's demo tank (30 × 20 × 25 cm) is only a placeholder.
 - **Connectivity:** how does the ESP32 get online while the truck moves — WiFi (phone hotspot) or a cellular modem (e.g. SIM800L / A7670)? This affects firmware and TLS memory budget.
-- **Broker + DB hosting:** proposed HiveMQ Cloud Serverless (MQTT, TLS 8883) and Neon (Postgres), both free. Render can't host a broker, and its free Postgres expires. Confirm.
+- ~~**Broker + DB hosting**~~ — decided 2026-10-16: Neon (Postgres) and EMQX Cloud Serverless (MQTT). HiveMQ was dropped (see Architecture Decisions).
 - ~~**Delivery zones**~~ — answered 2026-10-16: geofences are drawn on the map (point + radius) by an operator/admin, per truck or for the whole fleet.
 - **Scope:** keep Web3 anchoring for a later phase? Keep the 3D truck view at all?
 
 ### Earlier (v1)
 - Which testnet should anchoring target (Polygon Amoy vs. Sepolia vs. other)? Not yet confirmed.
 - Has the hardware team finalized the sensor list and units (e.g. is tilt in degrees or raw accelerometer g-values)? Battery cluster monitoring (SOC, SOH, Vmax/Vmin, Tmax/Tmin) has been designed into the UI but needs hardware confirmation.
-- MQTT broker hosting: self-hosted Mosquitto vs. managed (HiveMQ Cloud / EMQX Cloud)?
+- ~~MQTT broker hosting~~ — EMQX Cloud Serverless (2026-10-16).
 - Phase 2 ML model type and training data source — not yet scoped.
 - Weather forecast and electricity pricing data — what is the source/API for real data? Currently mocked in AnalyticsView.
 - Battery cluster fields (SOC, SOH, per-cluster voltages/temps) — are these per-truck or per-station? Currently shown in AnalyticsView as independent battery clusters.
@@ -132,6 +132,7 @@ Update this file after every meaningful implementation change.
 - **2026-10-16 — Dashboard login** is email + password with JWT; no public sign-up (admins create users). Roles admin / operator / viewer.
 - **2026-10-16 — Geofence rule:** the valve may only open inside an active geofence (point + radius) for the truck. Opening it anywhere else, or without a GPS fix, raises a critical alert and records an unauthorized discharge. The prototype's test button forces the valve open to exercise this. Detection only — the backend never commands the valve.
 - **2026-10-16 — Clean vs unexpected offline:** `online:false` with `ts` = clean shutdown (activity log only); without `ts` = MQTT Last Will → `device_offline` alert.
+- **2026-10-16 — MQTT broker: EMQX Cloud Serverless.** HiveMQ Cloud stopped selling its free Serverless plan on 2026-09-30 and shuts existing Serverless clusters down on 2026-12-31; its remaining cloud plan (Starter) is ~$249/month. EMQX Serverless has a free monthly quota (1M session-minutes ≈ 23 devices online 24/7, 1 GB traffic, ≤ 1,000 connections), MQTT over TLS 8883 with username/password — no code changes. Spend limit set to 0 so it pauses rather than bills. Traffic budget: ~600 B per reading (in + out), so one truck at 3 s non-stop ≈ 520 MB/month; realistic use is far lower.
 - **2026-10-16 — Reports are generated on demand** from stored data (discharges, alerts, telemetry, audit log) as CSV/JSON; nothing is precomputed.
 
 - MQTT chosen for device telemetry: lightweight pub/sub, widely supported on embedded hardware.

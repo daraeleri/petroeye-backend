@@ -218,7 +218,7 @@ def main():
     parser.add_argument("--scenario", default="delivery", choices=SCENARIOS)
     parser.add_argument("--broker", default="localhost", help="MQTT broker host")
     parser.add_argument("--port", type=int, default=1883, help="MQTT broker port (8883 with --tls)")
-    parser.add_argument("--tls", action="store_true", help="Use TLS (managed brokers such as HiveMQ Cloud)")
+    parser.add_argument("--tls", action="store_true", help="Use TLS (managed brokers such as EMQX Cloud Serverless)")
     parser.add_argument("--username", default=None, help="Device MQTT username")
     parser.add_argument("--password", default=None, help="Device MQTT password")
     parser.add_argument("--interval", type=float, default=3.0, help="Seconds between telemetry publishes")

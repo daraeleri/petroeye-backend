@@ -80,7 +80,7 @@ fill the secret env vars:
 |---|---|
 | `DATABASE_URL` | Neon **pooled** URL (`-pooler` host) — app traffic. Paste as given. |
 | `DATABASE_URL_UNPOOLED` | Neon **direct** URL — used only by `alembic upgrade head` at start-up |
-| `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` | HiveMQ Cloud cluster + credentials (TLS 8883 is preset) |
+| `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` | EMQX Cloud Serverless deployment address + the backend's credentials (TLS 8883 is preset) |
 | `CORS_ORIGINS` | The Vercel dashboard URL |
 | `ADMIN_EMAIL`, `ADMIN_PASSWORD` | First admin account |
 

@@ -35,8 +35,8 @@ The device sends raw measurements; all unit conversion and calibration happen on
 | ----- | ---- | ----- |
 | Frontend | Vercel | Talks only to the backend over HTTPS + WSS. |
 | Backend (FastAPI + MQTT subscriber) | Render free web service | Sleeps after ~15 min without HTTP traffic → kept awake by an external `/health` pinger; single instance. |
-| MQTT broker | Managed broker — proposed: HiveMQ Cloud Serverless (free, TLS 8883) | Render can't host a broker (HTTP only). Pending confirmation, see `progress-tracker.md`. |
-| Database | Managed Postgres — proposed: Neon free tier | Render's free Postgres expires, so it isn't used. Pending confirmation. |
+| MQTT broker | EMQX Cloud Serverless (free quota: 1M session-minutes + 1 GB traffic per month, TLS 8883) | Render can't host a broker (HTTP only). Spend limit 0 → the deployment pauses instead of billing if the quota runs out. |
+| Database | Neon (project petroEye, AWS us-east-1) | Render's free Postgres expires, so it isn't used. |
 
 Local development keeps `docker-compose.yml` (Mosquitto + Postgres).
 
@@ -112,7 +112,7 @@ Status messages update connectivity. An `online:false` **without** `ts` is the M
 ## Auth and Access Model
 
 - **Dashboard users**: email + password (bcrypt) → JWT bearer token (`ACCESS_TOKEN_MINUTES`, default 12 h). No public sign-up: admins create users; the first admin comes from `ADMIN_EMAIL`/`ADMIN_PASSWORD` on an empty database. Roles: `viewer` (read + export), `operator` (+ geofences, acknowledge alerts), `admin` (+ users, trucks, tank calibration, audit export). The WebSocket takes the token as `?token=`.
-- **Truck devices**: per-device MQTT username/password managed on the broker (e.g. HiveMQ Cloud access management), issued and revocable per truck, never shared across trucks. With `AUTO_REGISTER_TRUCKS=false` the backend also ignores trucks not registered via the API.
+- **Truck devices**: per-device MQTT username/password managed on the broker (EMQX deployment → Access Control → Authentication), issued and revocable per truck, never shared across trucks. With `AUTO_REGISTER_TRUCKS=false` the backend also ignores trucks not registered via the API.
 - **Blockchain writes**: signed by a single backend-held anchoring service key (never a user key); this key is never committed to the repo — see Invariants.
 
 ## Invariants

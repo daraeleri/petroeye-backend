@@ -23,11 +23,11 @@ This is the contract between the physical truck prototype and the PetroTwin soft
 
 ## 1. Connecting to the MQTT Broker
 
-| Setting            | Dev / simulation | Staging (proposed — see Open Questions) |
+| Setting            | Dev / simulation | Production (EMQX Cloud Serverless) |
 | ------------------ | ---------------- | --------------------------------------- |
-| Host               | `localhost` (or the dev machine IP given to you) | HiveMQ Cloud cluster host (given to you by the project admin) |
+| Host               | `localhost` (or the dev machine IP given to you) | EMQX deployment address, `<id>.<region>.emqxsl.com` (given to you by the project admin) |
 | Port               | `1883` (plain)   | `8883` (TLS required) |
-| TLS                | off              | on — use `WiFiClientSecure` with the broker's root CA certificate |
+| TLS                | off              | on — use `WiFiClientSecure` with the broker's root CA certificate (download it from the EMQX deployment overview) |
 | Client ID          | `truck-{truck_id}` (unique per device) | same |
 | Username / Password | Issued per device by the project admin | same |
 | Keep-alive         | 60 seconds       | same |

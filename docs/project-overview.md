@@ -40,7 +40,7 @@ The core safety rule is the **geofence**: operators mark approved discharge loca
 ### In Scope
 
 - FastAPI backend (REST + WebSocket) with async MQTT subscriber, JWT auth.
-- Managed MQTT broker in production (HiveMQ Cloud proposed), Mosquitto locally.
+- Managed MQTT broker in production (EMQX Cloud Serverless, free quota), Mosquitto locally.
 - Next.js dashboard (separate repo, Vercel).
 - Postgres (Neon proposed in production) with Alembic migrations.
 - Rule-based anomaly detection (Phase 1) and a pluggable ML service (Phase 2).
