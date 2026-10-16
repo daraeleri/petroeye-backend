@@ -266,3 +266,51 @@ async def test_cors_allows_vercel_app_and_previews_only(client):
                 "https://notpetroeye-frontend.vercel.app"):
         r = await preflight(bad)
         assert "access-control-allow-origin" not in r.headers, bad
+
+
+def event(truck_id, ts, pos, reason="outside_geofence"):
+    from app.mqtt.schemas import EventPayload
+
+    lat, lon = pos if pos else (None, None)
+    return EventPayload.model_validate({
+        "schema_version": 2, "truck_id": truck_id, "ts": ts.isoformat().replace("+00:00", "Z"),
+        "type": "valve_open_denied", "reason": reason, "gps_fix": pos is not None, "lat": lat, "lon": lon})
+
+
+async def test_valve_open_denied_event_raises_alert_with_cooldown(client, admin_headers, session):
+    from app.services.ingestion import ingest_event
+
+    h = admin_headers
+    await client.post("/trucks", headers=h, json={"truck_id": "t-deny"})
+    await client.post("/geofences", headers=h, json={"name": "Depot", "lat": DEPOT[0], "lon": DEPOT[1],
+                                                     "radius_m": 50, "truck_id": "t-deny"})
+    t = T0 + timedelta(hours=4)
+    _, alerts = await ingest_event(session, event("t-deny", t, FAR))
+    await session.commit()
+    assert [(a.type, a.severity) for a in alerts] == [("valve_open_denied", "critical")]
+    assert alerts[0].triggered_by["reason"] == "outside_geofence"
+    assert alerts[0].triggered_by["nearest_geofence_name"] == "Depot"
+    assert "outside every approved geofence" in alerts[0].message
+    # Button pressed again 10 s later → inside the 30 s cooldown, no new alert.
+    _, alerts = await ingest_event(session, event("t-deny", t + timedelta(seconds=10), FAR))
+    await session.commit()
+    assert alerts == []
+    # "moving" is only a warning (and a different type would still be in cooldown → use a new truck).
+    await client.post("/trucks", headers=h, json={"truck_id": "t-deny2"})
+    _, alerts = await ingest_event(session, event("t-deny2", t, None, reason="moving"))
+    await session.commit()
+    assert [(a.type, a.severity) for a in alerts] == [("valve_open_denied", "warning")]
+
+
+def test_event_payload_validation():
+    import pytest
+    from pydantic import ValidationError
+
+    from app.mqtt.schemas import EventPayload
+
+    base = {"schema_version": 2, "truck_id": "truck-001", "ts": "2026-10-17T10:00:00.000Z",
+            "type": "valve_open_denied", "reason": "no_gps_fix", "gps_fix": False, "lat": None, "lon": None}
+    EventPayload.model_validate(base)
+    for bad in ({"reason": "because"}, {"type": "other"}, {"gps_fix": True}, {"extra": 1}, {"ts": "2026-10-17T10:00:00"}):
+        with pytest.raises(ValidationError):
+            EventPayload.model_validate({**base, **bad})

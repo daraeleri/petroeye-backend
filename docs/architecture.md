@@ -59,6 +59,7 @@ Status messages update connectivity. An `online:false` **without** `ts` is the M
 | Type | Severity | Fires when |
 | ---- | -------- | ---------- |
 | `valve_open_outside_geofence` | critical | Valve becomes open while not inside an active geofence for the truck (or with no GPS fix), or the truck leaves the geofence with the valve open. A GPS dropout *during* a discharge that started inside a geofence keeps the last known geofence (no alert); if the fix returns outside with the valve still open, it alerts as `left_geofence_with_valve_open`. |
+| `valve_open_denied` | critical / warning | The firmware refused a valve-open request (event topic): critical when outside a geofence or without GPS fix, warning when moving or control is off; 30 s cooldown |
 | `volume_drop_valve_closed` | warning | Volume falls by more than 2% of capacity between two readings with the valve closed (provisional threshold; 10-min cooldown) |
 | `level_sensor_no_echo` | warning | `distance_cm` goes from a value to `null` |
 | `device_offline` | warning | MQTT Last Will received |

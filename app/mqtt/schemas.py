@@ -42,6 +42,35 @@ class TelemetryPayload(BaseModel):
         return self
 
 
+class EventPayload(BaseModel):
+    """Something the device decided locally that the dashboard must know about.
+
+    `valve_open_denied`: someone asked the truck to open the valve and the
+    firmware's interlock refused (the valve stayed closed).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[2]
+    truck_id: str = Field(pattern=TRUCK_ID_PATTERN)
+    ts: datetime
+    type: Literal["valve_open_denied"]
+    reason: Literal["outside_geofence", "no_gps_fix", "moving", "control_disabled"]
+    gps_fix: bool
+    lat: float | None = Field(ge=-90, le=90)
+    lon: float | None = Field(ge=-180, le=180)
+
+    @model_validator(mode="after")
+    def _consistency(self) -> "EventPayload":
+        if self.gps_fix and (self.lat is None or self.lon is None):
+            raise ValueError("gps_fix is true but lat/lon are null")
+        if not self.gps_fix and (self.lat is not None or self.lon is not None):
+            raise ValueError("gps_fix is false but lat/lon are set")
+        if self.ts.tzinfo is None:
+            raise ValueError("ts must be UTC with a 'Z' suffix (timezone-aware)")
+        return self
+
+
 class StatusPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -82,6 +82,7 @@ class Truck:
         self.phase = "drive_out"
         self.phase_ticks = 0
         self.forced_open_done = False
+        self.pending_events: list[str] = []  # valve_open_denied reasons to publish
 
     # --- movement ------------------------------------------------------------
 
@@ -104,11 +105,14 @@ class Truck:
 
     # --- scenarios -----------------------------------------------------------
 
-    def _delivery_cycle(self, forced_stop_halfway: bool):
+    def _delivery_cycle(self, forced_stop_halfway: bool, deny_only: bool = False):
         """Drive to the depot, discharge inside the geofence, return, refill.
 
         With forced_stop_halfway, the truck first stops halfway and the valve
         is forced open (the prototype's test button) → unauthorized discharge.
+        With deny_only, the firmware's interlock refuses instead (the real
+        truck's default): the valve stays closed and a valve_open_denied
+        event is published.
         """
         self.phase_ticks += 1
         if self.phase == "drive_out":
@@ -121,10 +125,15 @@ class Truck:
             if self._drive_towards(DEPOT_LAT, DEPOT_LON):
                 self._set_phase("arrived")
         elif self.phase == "forced_open":
-            # Test button pressed: valve forced open outside the geofence.
-            self.valve_open = self.phase_ticks <= 4
-            if self.valve_open:
-                self.volume_l -= 0.25
+            if deny_only:
+                # TRIANGLE pressed twice outside a zone; the firmware refuses.
+                if self.phase_ticks in (1, 4):
+                    self.pending_events.append("outside_geofence")
+            else:
+                # Test button pressed: valve forced open outside the geofence.
+                self.valve_open = self.phase_ticks <= 4
+                if self.valve_open:
+                    self.volume_l -= 0.25
             if self.phase_ticks > 6:
                 self.forced_open_done = True
                 self._set_phase("drive_out")
@@ -154,6 +163,8 @@ class Truck:
             self._delivery_cycle(forced_stop_halfway=False)
         elif self.scenario == "unauthorized_discharge":
             self._delivery_cycle(forced_stop_halfway=True)
+        elif self.scenario == "denied_attempt":
+            self._delivery_cycle(forced_stop_halfway=True, deny_only=True)
         elif self.scenario == "leak":
             # Parked, valve closed, tank slowly emptying.
             self.speed_kmh = 0.0
@@ -197,6 +208,19 @@ class Truck:
             "valve_open": self.valve_open,
         }
 
+    def denied_event(self, reason: str) -> dict:
+        fix = self.gps_fix
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "truck_id": self.truck_id,
+            "ts": utc_ts(),
+            "type": "valve_open_denied",
+            "reason": reason,
+            "gps_fix": fix,
+            "lat": round(self.lat, 6) if fix else None,
+            "lon": round(self.lon, 6) if fix else None,
+        }
+
     def status(self, online: bool = True) -> dict:
         return {
             "schema_version": SCHEMA_VERSION,
@@ -209,7 +233,7 @@ class Truck:
         }
 
 
-SCENARIOS = ["delivery", "unauthorized_discharge", "leak", "gps_loss", "sensor_dropout", "parked"]
+SCENARIOS = ["delivery", "unauthorized_discharge", "denied_attempt", "leak", "gps_loss", "sensor_dropout", "parked"]
 
 
 def main():
@@ -251,6 +275,10 @@ def main():
             truck.step()
             payload = truck.telemetry()
             client.publish(telemetry_topic, json.dumps(payload), qos=1)
+            for reason in truck.pending_events:
+                client.publish(f"petrotwin/{args.truck_id}/event", json.dumps(truck.denied_event(reason)), qos=1)
+                print(f"[{args.truck_id}] valve open REFUSED ({reason}) -> event published")
+            truck.pending_events.clear()
             if truck.valve_open != last_valve:
                 print(f"[{args.truck_id}] valve {'OPEN' if truck.valve_open else 'closed'} "
                       f"(phase={truck.phase}, {truck.volume_l:.1f} L)")

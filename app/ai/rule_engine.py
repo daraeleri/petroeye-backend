@@ -22,6 +22,7 @@ VOLUME_DROP_VALVE_CLOSED = "volume_drop_valve_closed"
 GPS_FIX_LOST = "gps_fix_lost"
 LEVEL_SENSOR_NO_ECHO = "level_sensor_no_echo"
 DEVICE_OFFLINE = "device_offline"
+VALVE_OPEN_DENIED = "valve_open_denied"
 
 
 class ReadingLike(Protocol):
@@ -139,6 +140,38 @@ def evaluate_reading(
         }))
 
     return anomalies
+
+
+_DENY_TEXT = {
+    "outside_geofence": "the truck is outside every approved geofence",
+    "no_gps_fix": "the truck has no GPS fix, so its location can't be confirmed",
+    "moving": "the truck is moving",
+    "control_disabled": "vehicle control is disabled (START not pressed)",
+}
+
+
+def evaluate_event(event: Any, nearest: FenceHit | None, rules: dict = RULES) -> list[Anomaly]:
+    """Anomalies from a device event (currently only `valve_open_denied`)."""
+    rule = rules.get(VALVE_OPEN_DENIED)
+    if not rule or getattr(event, "type", None) != VALVE_OPEN_DENIED:
+        return []
+    reason = event.reason
+    severity = (rule.get("severity_by_reason") or {}).get(reason, "warning")
+    trig: dict[str, Any] = {
+        "reason": reason,
+        "explanation": _DENY_TEXT.get(reason, reason),
+        "gps_fix": event.gps_fix,
+        "lat": event.lat,
+        "lon": event.lon,
+        "valve_open": False,
+    }
+    if nearest is not None:
+        trig["nearest_geofence_id"] = str(nearest.fence.id)
+        trig["nearest_geofence_name"] = nearest.fence.name
+        trig["distance_to_nearest_m"] = round(nearest.distance_m, 1)
+        trig["nearest_radius_m"] = nearest.fence.radius_m
+    message = f"{rule['message']}: {_DENY_TEXT.get(reason, reason)}"
+    return [Anomaly(VALVE_OPEN_DENIED, severity, message, trig)]
 
 
 def evaluate_status(was_online: bool, online: bool, unexpected: bool, rules: dict = RULES) -> list[Anomaly]:

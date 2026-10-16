@@ -31,14 +31,15 @@ from paho.mqtt.enums import CallbackAPIVersion
 from pydantic import BaseModel, ValidationError
 
 from app.config import settings
-from app.mqtt.schemas import StatusPayload, TelemetryPayload
-from app.services.ingestion import handle_status, handle_telemetry
+from app.mqtt.schemas import EventPayload, StatusPayload, TelemetryPayload
+from app.services.ingestion import handle_event, handle_status, handle_telemetry
 
 logger = logging.getLogger("petrotwin.mqtt")
 
 TOPIC_PREFIX = "petrotwin"
 TELEMETRY_TOPIC_FILTER = f"{TOPIC_PREFIX}/+/telemetry"
 STATUS_TOPIC_FILTER = f"{TOPIC_PREFIX}/+/status"
+EVENT_TOPIC_FILTER = f"{TOPIC_PREFIX}/+/event"
 
 
 class MQTTSubscriber:
@@ -81,9 +82,9 @@ class MQTTSubscriber:
             logger.error("MQTT connect failed: %s", reason_code)
             return
         self.connected = True
-        client.subscribe([(TELEMETRY_TOPIC_FILTER, 1), (STATUS_TOPIC_FILTER, 1)])
-        logger.info("MQTT connected; subscribed to %s and %s (session present=%s)",
-                    TELEMETRY_TOPIC_FILTER, STATUS_TOPIC_FILTER, flags.session_present)
+        client.subscribe([(TELEMETRY_TOPIC_FILTER, 1), (STATUS_TOPIC_FILTER, 1), (EVENT_TOPIC_FILTER, 1)])
+        logger.info("MQTT connected; subscribed to %s, %s and %s (session present=%s)",
+                    TELEMETRY_TOPIC_FILTER, STATUS_TOPIC_FILTER, EVENT_TOPIC_FILTER, flags.session_present)
 
     def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
         self.connected = False
@@ -110,6 +111,8 @@ class MQTTSubscriber:
             self._validate_and_dispatch(raw, TelemetryPayload, handle_telemetry, msg.topic, truck_id)
         elif kind == "status":
             self._validate_and_dispatch(raw, StatusPayload, handle_status, msg.topic, truck_id)
+        elif kind == "event":
+            self._validate_and_dispatch(raw, EventPayload, handle_event, msg.topic, truck_id)
         else:
             logger.warning("Rejected unknown topic kind '%s' on %s", kind, msg.topic)
 

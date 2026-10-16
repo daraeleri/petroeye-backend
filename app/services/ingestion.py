@@ -21,6 +21,7 @@ from app.ai.rule_engine import (
     RULES,
     VALVE_OPEN_OUTSIDE_GEOFENCE,
     ReadingContext,
+    evaluate_event,
     evaluate_reading,
     evaluate_status,
 )
@@ -30,7 +31,7 @@ from app.db.base import AsyncSessionLocal
 from app.db.models import Alert, Discharge, TankCalibration, Telemetry, Truck
 from app.domain.geo import FenceHit, find_containing_fence, nearest_fence
 from app.domain.tank import capacity_litres, measure
-from app.mqtt.schemas import StatusPayload, TelemetryPayload
+from app.mqtt.schemas import EventPayload, StatusPayload, TelemetryPayload
 from app.schemas.operations import DischargeOut
 from app.services import audit
 from app.services.alerts import alert_out, new_alert
@@ -244,6 +245,28 @@ async def ingest_status(session: AsyncSession, payload: StatusPayload) -> tuple[
     return truck, alerts
 
 
+async def ingest_event(session: AsyncSession, payload: EventPayload) -> tuple[Truck | None, list[Alert]]:
+    """A device-side decision, e.g. the firmware refused to open the valve."""
+    truck = await _get_or_register_truck(session, payload.truck_id)
+    if truck is None:
+        return None, []
+    last_seen = as_utc(truck.last_seen_at)
+    if last_seen is None or payload.ts > last_seen:
+        truck.last_seen_at = payload.ts
+    _mark_online(session, truck, payload.ts)
+
+    fences = await active_geofences_for(session, payload.truck_id)
+    alerts: list[Alert] = []
+    for anomaly in evaluate_event(payload, nearest_fence(payload.lat, payload.lon, fences)):
+        if await _in_cooldown(session, payload.truck_id, anomaly.type, payload.ts):
+            continue
+        alerts.append(new_alert(session, payload.truck_id, anomaly, payload.ts, payload.lat, payload.lon))
+        logger.warning("Alert %s [%s] on %s: %s", anomaly.type, anomaly.severity, payload.truck_id,
+                       anomaly.triggered_by)
+    await session.flush()
+    return truck, alerts
+
+
 # --- Entry points used by the MQTT client -------------------------------------
 
 # One lock per truck: messages for the same truck are processed in order so
@@ -300,6 +323,16 @@ async def handle_status(payload: StatusPayload) -> None:
     async with _truck_locks[payload.truck_id]:
         async with AsyncSessionLocal() as session:
             truck, alerts = await ingest_status(session, payload)
+            if truck is None:
+                return
+            await session.commit()
+            await _broadcast_after_commit(session, payload.truck_id, alerts)
+
+
+async def handle_event(payload: EventPayload) -> None:
+    async with _truck_locks[payload.truck_id]:
+        async with AsyncSessionLocal() as session:
+            truck, alerts = await ingest_event(session, payload)
             if truck is None:
                 return
             await session.commit()

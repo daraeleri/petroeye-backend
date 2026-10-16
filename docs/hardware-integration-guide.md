@@ -41,6 +41,7 @@ Each truck gets its own device credentials. Do not reuse credentials across truc
 | ----- | --------- | --- | ------- |
 | `petrotwin/{truck_id}/telemetry` | Device → Backend | 1 | Regular sensor readings |
 | `petrotwin/{truck_id}/status` | Device → Backend | 1 | Heartbeat / online-offline / device health (also the LWT topic) |
+| `petrotwin/{truck_id}/event` | Device → Backend | 1 | Decisions the firmware made locally — currently `valve_open_denied` (§4b) |
 
 There are no Backend → Device topics. The device must not subscribe to anything to receive commands.
 
@@ -126,6 +127,37 @@ The backend tells the two offline cases apart by `ts`:
 | ------- | ------- | ------ |
 | `online: false` **with** `ts` (published by the device) | Clean shutdown | Truck shown offline, logged in the activity report, **no alert** |
 | `online: false` **without** `ts` (the LWT, published by the broker) | Device dropped off unexpectedly (power loss, network loss, crash) | Truck shown offline + `device_offline` warning alert |
+
+## 4b. Event Payload — `valve_open_denied`
+
+The firmware enforces the geofence itself (fail-closed): it refuses to open the valve when the truck is moving, has no recent GPS fix, is outside its configured zones, or vehicle control is off. Because the valve then stays closed, telemetry alone would never show the attempt — so the firmware reports it. Publish to `petrotwin/{truck_id}/event` each time a valve-open request is refused (at most one per button press):
+
+```json
+{
+  "schema_version": 2,
+  "truck_id": "truck-001",
+  "ts": "2026-10-17T10:32:05.250Z",
+  "type": "valve_open_denied",
+  "reason": "outside_geofence",
+  "gps_fix": true,
+  "lat": 4.103402,
+  "lon": 9.755918
+}
+```
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `type` | string | `valve_open_denied` (the only event type so far). |
+| `reason` | string | `outside_geofence`, `no_gps_fix`, `moving` or `control_disabled`. |
+| `gps_fix`, `lat`, `lon` | as telemetry | Position at the moment of the request; `null` without a fix. |
+
+The backend raises a `valve_open_denied` alert: **critical** for `outside_geofence` / `no_gps_fix`, **warning** for `moving` / `control_disabled`, with a 30 s cooldown per truck so a held or repeated button produces one alert.
+
+The firmware's own zones must match the dashboard geofences (same centres and radius, assigned to the truck), otherwise the two disagree about where discharging is allowed.
+
+## 4c. Reference Firmware
+
+`firmware/petroeye_truck/` in this repo is the reference ESP32 firmware (Arduino IDE sketch; `firmware/platformio.ini` builds it from the command line). It implements this whole contract: telemetry, status + Last Will, the `valve_open_denied` event, NTP/GPS timestamps with milliseconds, TLS to EMQX, and publishes from a separate core so the network can never stall driving or the valve interlocks. See `firmware/README.md` for setup and Bluetooth troubleshooting.
 
 ## 5. What NOT to Do
 

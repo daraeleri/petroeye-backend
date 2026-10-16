@@ -25,6 +25,19 @@ volume_drop_valve_closed:
   cooldown_s: 600
   message: "Tank volume dropped while the valve was closed — possible leak or theft"
 
+# The firmware REFUSED a valve-open request (event topic). The valve stayed
+# closed, but someone tried to discharge: outside an approved zone or
+# without a GPS fix is treated as critical.
+valve_open_denied:
+  message: "Valve open request refused by the truck"
+  severity_by_reason:
+    outside_geofence: critical
+    no_gps_fix: critical
+    moving: warning
+    control_disabled: warning
+  # Holding or mashing the button would otherwise raise an alert per press.
+  cooldown_s: 30
+
 # GPS had a fix on the previous reading and lost it on this one.
 gps_fix_lost:
   severity: info

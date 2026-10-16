@@ -32,6 +32,7 @@ async def list_alerts(
     | type | severity | when |
     |---|---|---|
     | `valve_open_outside_geofence` | critical | valve opened (or still open) outside an approved geofence, or with no GPS fix |
+    | `valve_open_denied` | critical / warning | the truck REFUSED a valve-open request (critical if outside a geofence or without GPS fix; warning if moving or control off) |
     | `volume_drop_valve_closed` | warning | volume fell between readings while the valve was closed (leak/theft) |
     | `level_sensor_no_echo` | warning | ultrasonic sensor stopped returning a distance |
     | `device_offline` | warning | the ESP32 dropped off unexpectedly (MQTT Last Will; a clean shutdown is not an alert) |

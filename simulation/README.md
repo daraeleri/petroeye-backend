@@ -29,6 +29,7 @@ fleet-wide **Demo depot** geofence (100 m) the trucks drive to.
 |---|---|---|
 | `delivery` | Drive to the depot, open the valve inside the geofence, return, refill | Authorized discharge, no alerts |
 | `unauthorized_discharge` | Stops halfway and the valve is **forced open** (the prototype's test button), then a normal delivery | Critical `valve_open_outside_geofence` + an unauthorized discharge, then an authorized one |
+| `denied_attempt` | Stops halfway and TRIANGLE is pressed twice; the truck's interlock **refuses** (like the real firmware), then a normal delivery | One critical `valve_open_denied` alert (cooldown absorbs the 2nd press), no discharge at the stop |
 | `leak` | Parked, valve closed, volume keeps dropping | One `volume_drop_valve_closed` warning (10-minute cooldown) |
 | `gps_loss` | Delivery cycle with periodic GPS fix loss | `gps_fix_lost` info alerts |
 | `sensor_dropout` | Delivery cycle where the ultrasonic sensor stops echoing | `level_sensor_no_echo` warnings |

@@ -19,7 +19,7 @@ Update this file after every meaningful implementation change.
 4. ~~Rule engine → geofence valve rule, leak/theft, GPS lost, no echo, device offline; transition-based + cooldown~~ — done 2026-10-16.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
 6. ~~Frontend → login, map with geofence drawing, tank/valve/GPS twin, alerts, reports~~ — rebuilt 2026-10-16 (frontend repo); Vercel deploy pending.
-7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
+7. ~~Firmware~~ — reference firmware in `firmware/petroeye_truck/` (2026-10-17); needs testing on the replacement board.
 8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), ~~Render~~ (done 2026-10-16, https://petroeye-backend.onrender.com), `/health` keep-alive pinger, ~~Vercel~~ (done 2026-10-16, https://petroeye-frontend.vercel.app).
 
 ## API changes for the frontend (2026-10-16)
@@ -145,6 +145,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-17 — Reference firmware + `valve_open_denied` events.** The team's firmware enforces the geofence on the truck (valve refused outside its zones), so the "valve opened outside geofence" alert could never fire on the real truck. New device→backend topic `petrotwin/{id}/event` with `valve_open_denied` (reason `outside_geofence` / `no_gps_fix` / `moving` / `control_disabled`) → alert of the same type (critical/warning by reason, 30 s cooldown). Firmware in `firmware/petroeye_truck/`: original pins and Dabble map, unique BT name per board, stop on BT disconnect, reset-reason boot screen, cloud link on core 0 (Wi-Fi + NTP + MQTT/TLS, Last Will), geofence radius 8 m, optional test force-open. Simulator scenario `denied_attempt`. The first ESP32 died (per the team's report); likely contributors flagged in `firmware/README.md`: 5 V HC-SR04 ECHO into GPIO13, TRIG on strapping pin GPIO12. Open: should the firmware fetch its zones from the backend instead of `config.h`? (would add a device-facing API).
 
 - **2026-10-16 — Frontend live on Vercel:** https://petroeye-frontend.vercel.app (built with `NEXT_PUBLIC_API_URL=https://petroeye-backend.onrender.com`, `NEXT_PUBLIC_WS_URL=wss://petroeye-backend.onrender.com/ws`). The backend allows it through `CORS_ORIGIN_REGEX` (default `https://petroeye-frontend(-[a-z0-9-]+)?\.vercel\.app`, so preview deploys work too); `CORS_ORIGINS` only needs `http://localhost:3000`. Added because the Render dashboard was unreachable from the dev network: the ISP resets TLS to Render edge IPs 216.24.57.16/.18 (used by dashboard.render.com and *.onrender.com) while other Render IPs work — Render itself was healthy. Users on that network can't reach the API until it sits behind a custom domain (e.g. via Cloudflare).
 
