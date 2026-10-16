@@ -20,7 +20,7 @@ Update this file after every meaningful implementation change.
 5. ~~Simulator → v2 payloads and scenarios~~ — done 2026-10-16 (+ `seed_demo.py`).
 6. ~~Frontend → login, map with geofence drawing, tank/valve/GPS twin, alerts, reports~~ — rebuilt 2026-10-16 (frontend repo); Vercel deploy pending.
 7. Firmware → `firmware/` PlatformIO project for the ESP32 (incl. the test button).
-8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), ~~Render~~ (done 2026-10-16, https://petroeye-backend.onrender.com), `/health` keep-alive pinger, Vercel (with the frontend).
+8. Deployment → ~~Neon~~ (done 2026-10-16), ~~EMQX Cloud Serverless (MQTT)~~ (done 2026-10-16), ~~Render~~ (done 2026-10-16, https://petroeye-backend.onrender.com), `/health` keep-alive pinger, ~~Vercel~~ (done 2026-10-16, https://petroeye-frontend.vercel.app).
 
 ## API changes for the frontend (2026-10-16)
 
@@ -145,6 +145,8 @@ Update this file after every meaningful implementation change.
 - **Mock data in AnalyticsView/EnergyView**: battery cluster, weather, pricing, and strategy execution data are currently static mocks. These are UI prototypes until the backend schema and data sources are finalized. The component boundaries are clean — swapping mock arrays for WS-fed or REST-fetched data requires no structural changes.
 
 ## Session Notes
+
+- **2026-10-16 — Frontend live on Vercel:** https://petroeye-frontend.vercel.app (built with `NEXT_PUBLIC_API_URL=https://petroeye-backend.onrender.com`, `NEXT_PUBLIC_WS_URL=wss://petroeye-backend.onrender.com/ws`). Render's `CORS_ORIGINS` must include that origin (plus `http://localhost:3000` for local dev).
 
 - **2026-10-16 — Backend fixes found while building the frontend:** (1) `rules.yaml` is now read as UTF-8 (on Windows the default cp1252 garbled the em dash in alert messages; Linux/Render was unaffected). (2) A GPS dropout in the middle of an authorized discharge no longer raises a critical `valve_open_outside_geofence`: the reading keeps the last known geofence; leaving the zone with the valve open still alerts; `no_gps_fix` now takes priority over `left_geofence` as the reason. (3) Two backend instances inserting the same reading (overlapping deploys, or a stray local server) no longer crash the handler: the unique-constraint `IntegrityError` is treated as "already stored". 39 tests.
 
